@@ -1,0 +1,53 @@
+{
+  "name": "@hamardikan/observability-agent-mcp",
+  "version": "0.1.0",
+  "description": "Portable read-only MCP server for bounded observability evidence",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "license": "Apache-2.0",
+  "private": false,
+  "bin": {
+    "observability-agent-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:stdio": "node scripts/stdio-smoke.mjs",
+    "inspector:list": "mcp-inspector --cli node dist/cli.js --method tools/list",
+    "audit": "npm audit --audit-level=high",
+    "package:dry": "npm pack --dry-run",
+    "validate": "npm run typecheck && npm test && npm run build && npm run test:stdio && npm run inspector:list && npm run package:dry && npm run audit && ./ci/validate-foundation.sh",
+    "start": "node dist/cli.js",
+    "container:build": "docker build --file Containerfile --tag observability-agent-mcp:local ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "pngjs": "7.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "0.22.0",
+    "@types/node": "24.10.4",
+    "@types/pngjs": "6.0.5",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

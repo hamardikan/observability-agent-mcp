@@ -5,9 +5,10 @@ data into bounded evidence that AI agents can inspect safely.
 
 ## Status
 
-Documentation foundation only. There is no runnable server or published image
-yet. The first implementation milestone starts after the contracts in this repo
-are reviewed.
+Runnable local foundation. The TypeScript MCP server exposes the complete
+read-only tool contract over stdio using deterministic fake data and synthetic
+PNG visuals. Production Grafana and Prometheus-compatible adapters are not
+connected yet.
 
 ## Product Boundary
 
@@ -17,7 +18,7 @@ or remediate production systems.
 
 ```text
 AI client
-  | stdio or authenticated Streamable HTTP
+  | stdio (implemented)
   v
 Observability Agent MCP
   - strict tool schemas
@@ -25,8 +26,9 @@ Observability Agent MCP
   - label and value redaction
   - normalized evidence bundles
   |
-  +--> Grafana API
-  +--> Prometheus-compatible API
+  +--> deterministic fake provider (implemented)
+  +--> Grafana API (planned)
+  +--> Prometheus-compatible API (planned)
        - Prometheus
        - VictoriaMetrics
 ```
@@ -51,22 +53,51 @@ silence alerts, restart services, run scripts, or trigger deployments.
 
 ## Portability
 
-The same tool contracts will be available through:
+The current foundation can be consumed through:
 
 - stdio for local desktop and CLI agents;
-- Streamable HTTP for remote agents;
-- an OCI image;
-- an npm-distributed CLI.
+- a locally built OCI image;
+- the package CLI produced by `npm pack`.
+
+Authenticated Streamable HTTP is planned, not implemented. No package or image
+has been published yet.
 
 Remote HTTP deployment requires authentication. Publishing this repository does
 not imply that an MCP endpoint should be exposed without OAuth, network policy,
 rate limits, and audience-bound scopes.
 
-There is no install or run command before M1. Until then, the only supported
-command is the documentation-foundation check:
+## Run Locally
+
+Node.js 22 and npm are required.
 
 ```bash
-./ci/validate-foundation.sh
+npm ci
+npm run build
+node dist/cli.js
+```
+
+The process speaks MCP over stdio, so launch it from an MCP client rather than
+typing into the terminal. A client command definition is:
+
+```json
+{
+  "command": "node",
+  "args": ["/absolute/path/to/observability-agent-mcp/dist/cli.js"]
+}
+```
+
+Inspect tool discovery and run every local gate with:
+
+```bash
+npm run inspector:list
+npm run validate
+```
+
+Build and run the non-root OCI image over stdio with:
+
+```bash
+npm run container:build
+docker run --rm -i observability-agent-mcp:local
 ```
 
 ## Relationship To Grafana MCP
@@ -113,6 +144,7 @@ offer both namespaces, but each request has one explicit owner.
 - [Client Compatibility](docs/client-compatibility.md)
 - [Test Strategy](docs/test-strategy.md)
 - [Roadmap](docs/roadmap.md)
+- [Implementation Status](docs/implementation-status.md)
 - [Grafana Visual Context ADR](docs/decisions/0002-grafana-visual-context.md)
 - [Contributing](CONTRIBUTING.md)
 

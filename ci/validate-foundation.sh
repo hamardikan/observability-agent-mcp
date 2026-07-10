@@ -14,13 +14,24 @@ required=(
   docs/roadmap.md
   docs/decisions/0001-product-boundary.md
   docs/decisions/0002-grafana-visual-context.md
+  docs/implementation-status.md
+  package.json
+  package-lock.json
+  tsconfig.json
+  tsconfig.build.json
+  Containerfile
+  src/cli.ts
+  src/server/create-server.ts
+  src/domain/tool-schemas.ts
+  src/providers/fake-provider.ts
+  src/visuals/synthetic-renderer.ts
 )
 
 for path in "${required[@]}"; do
   test -f "$path" || { echo "missing=$path" >&2; exit 1; }
 done
 
-grep -q "Documentation foundation only" README.md
+grep -q "Runnable local foundation" README.md
 grep -q "Version 1 is read-only" docs/security-model.md
 grep -q "Streamable HTTP" docs/client-compatibility.md
 grep -q "WWW-Authenticate" docs/security-model.md
@@ -67,7 +78,7 @@ from pathlib import Path
 errors = []
 link_pattern = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 for source in Path(".").rglob("*.md"):
-    if ".git" in source.parts:
+    if any(part in {".git", "node_modules", "dist"} for part in source.parts):
         continue
     for target in link_pattern.findall(source.read_text(errors="ignore")):
         target = target.strip().split("#", 1)[0]
