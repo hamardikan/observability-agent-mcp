@@ -8,7 +8,7 @@ Pak Satpam gives an AI agent the evidence it needs to understand infrastructure
 health, investigate incidents, inspect CI failures, and show Grafana visuals
 without handing the model a shell or unrestricted infrastructure access.
 
-[![Validate](../../actions/workflows/validate.yml/badge.svg)](../../actions/workflows/validate.yml)
+[![Validate](https://github.com/hamardikan/pak-satpam/actions/workflows/validate.yml/badge.svg)](https://github.com/hamardikan/pak-satpam/actions/workflows/validate.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-2f6f4e.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-43853d.svg)](package.json)
 [![MCP](https://img.shields.io/badge/protocol-MCP-111827.svg)](https://modelcontextprotocol.io/)
@@ -79,7 +79,9 @@ expand its own permissions.
 
 The CI module stays disabled until the deployment provides repository and
 workflow allowlists, a GitHub App identity, a replay-safe approval key, and
-metadata-only audit storage. See the [CI/CD runbook](docs/ci-cd-runbook.md).
+metadata-only audit storage. The public
+`.github/workflows/goal14-controlled-fixture.yml` workflow provides a bounded
+failure-and-rerun test. See the [CI/CD runbook](docs/ci-cd-runbook.md).
 
 ## Run It
 
