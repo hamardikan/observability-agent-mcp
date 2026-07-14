@@ -49,8 +49,9 @@ export interface ServiceHealthMapping {
 
 export interface VictoriaMetricsProviderOptions {
   readonly baseUrl: string;
-  /** vmalert is deployed independently from VictoriaMetrics. */
+  /** vmalert or Grafana's embedded Alertmanager read-only API. */
   readonly alertsBaseUrl: string;
+  readonly alertsProvider?: "vmalert" | "grafana-alertmanager";
   /** Optional bearer token; private internal VictoriaMetrics deployments need none. */
   readonly token?: string;
   readonly fetch: typeof globalThis.fetch;
@@ -117,7 +118,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
         },
         featureFlags: [
           "named-query-templates",
-          "vmalert-alerts",
+          this.#options.alertsProvider === "grafana-alertmanager" ? "grafana-alertmanager-alerts" : "vmalert-alerts",
           ...(this.#options.visualsEnabled ? ["grafana-visuals"] : []),
         ],
       },
@@ -159,14 +160,15 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
   async activeAlerts(input: ActiveAlertsInput): Promise<ActiveAlertsResult> {
     const request = ActiveAlertsInputSchema.parse(input);
     const observedAt = this.now();
-    const payload = await this.requestJson(this.alertsBaseUrl, "api/v1/alerts");
+    const grafanaAlertmanager = this.#options.alertsProvider === "grafana-alertmanager";
+    const payload = await this.requestJson(this.alertsBaseUrl, grafanaAlertmanager ? "api/alertmanager/grafana/api/v2/alerts" : "api/v1/alerts");
     if (payload === undefined) {
       return ActiveAlertsResultSchema.parse({
         ...this.evidence(observedAt, "unknown", [unavailableWarning()]),
         data: { alerts: [] },
       });
     }
-    const rawAlerts = alertsFrom(payload);
+    const rawAlerts = alertsFrom(payload, grafanaAlertmanager);
     if (rawAlerts === undefined) {
       return ActiveAlertsResultSchema.parse({
         ...this.evidence(observedAt, "unknown", [unavailableWarning()]),
@@ -174,7 +176,7 @@ export class VictoriaMetricsProvider implements ObservabilityProvider {
       });
     }
     const truncated = rawAlerts.length > MAX_ALERTS;
-    const alerts = rawAlerts.slice(0, MAX_ALERTS).flatMap((alert, index) => normalizeAlert(alert, index, observedAt));
+    const alerts = rawAlerts.slice(0, MAX_ALERTS).flatMap((alert, index) => normalizeAlert(alert, index, observedAt, grafanaAlertmanager));
     const filtered = alerts.filter((alert) =>
       (request.services === undefined || request.services.includes(alert.serviceId)) &&
       (request.states === undefined || request.states.includes(alert.state)) &&
@@ -386,14 +388,15 @@ function parseSample(raw: unknown): Array<{ timestamp: string; value: number }> 
   return [{ timestamp: date.toISOString(), value }];
 }
 
-function alertsFrom(payload: unknown): unknown[] | undefined {
+function alertsFrom(payload: unknown, grafanaAlertmanager: boolean): unknown[] | undefined {
+  if (grafanaAlertmanager) return Array.isArray(payload) ? payload : undefined;
   const root = record(payload);
   const data = root === undefined ? undefined : record(root.data);
   if (root?.status !== "success" || data === undefined || !Array.isArray(data.alerts)) return undefined;
   return data.alerts;
 }
 
-function normalizeAlert(raw: unknown, index: number, observedAt: string): Array<{
+function normalizeAlert(raw: unknown, index: number, observedAt: string, grafanaAlertmanager: boolean): Array<{
   alertId: string;
   name: string;
   state: "firing" | "pending" | "resolved";
@@ -405,9 +408,10 @@ function normalizeAlert(raw: unknown, index: number, observedAt: string): Array<
   const item = record(raw);
   const labels = item === undefined ? undefined : record(item.labels);
   const annotations = item === undefined ? undefined : record(item.annotations);
+  const status = item === undefined ? undefined : record(item.status);
   if (item === undefined) return [];
   const name = safeText(item.name, 256) ?? safeText(labels?.alertname, 256) ?? `Alert ${index + 1}`;
-  const alertId = slugId(safeText(labels?.alertname, 256) ?? name, `alert-${index + 1}`);
+  const alertId = slugId(safeText(item.fingerprint, 256) ?? safeText(labels?.alertname, 256) ?? name, `alert-${index + 1}`);
   const serviceId = logicalId(labels?.service) ? String(labels?.service) : "unknown";
   const summary = safeText(annotations?.summary, 512);
   const description = safeText(annotations?.description, 1_024);
@@ -415,9 +419,9 @@ function normalizeAlert(raw: unknown, index: number, observedAt: string): Array<
   return [{
     alertId,
     name,
-    state: alertState(item.state),
+    state: grafanaAlertmanager ? grafanaAlertState(status?.state) : alertState(item.state),
     severity: alertSeverity(labels?.severity),
-    startsAt: timestamp(item.activeAt) ?? timestamp(item.startsAt) ?? observedAt,
+    startsAt: timestamp(grafanaAlertmanager ? item.startsAt : item.activeAt) ?? timestamp(item.startsAt) ?? observedAt,
     serviceId,
     annotations: {
       ...(summary === undefined ? {} : { summary }),
@@ -435,6 +439,11 @@ function healthStatus(value: number, mapping: ServiceHealthMapping): "healthy" |
   if (matches(value, mapping.healthyWhen)) return "healthy";
   if (mapping.degradedWhen !== undefined && matches(value, mapping.degradedWhen)) return "degraded";
   return "unhealthy";
+}
+
+function grafanaAlertState(value: unknown): "firing" | "pending" | "resolved" {
+  if (value === "suppressed" || value === "unprocessed") return "pending";
+  return value === "active" ? "firing" : "resolved";
 }
 
 function alertState(value: unknown): "firing" | "pending" | "resolved" {

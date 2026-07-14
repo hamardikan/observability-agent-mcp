@@ -1,5 +1,5 @@
 const SECRET_PATTERNS: readonly RegExp[] = [
-  /(?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi,
+  /(?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?[^\s,;]+/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi,
   /\b(?:gh[pousr]_\w+|github_pat_\w+|glpat-\w+)/gi,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,

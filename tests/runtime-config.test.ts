@@ -109,6 +109,32 @@ describe("private runtime configuration", () => {
     expect(runtime.ci).toBeDefined();
   });
 
+  it("loads the read-only Jenkins provider and Grafana Alertmanager option", async () => {
+    const approvalKeyPath = join(directory, "approval-key");
+    writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
+    writeFileSync(configPath, `${VALID_CONFIG.replace("type: vmalert", "type: grafana-alertmanager").replace("base_url: http://vmalert:8880", "base_url: https://grafana:3000")}
+ci:
+  enabled: true
+  provider: jenkins
+  allowlist:
+    - repo: academytools/planpal-infra-6
+      workflows: [planpal-infra-6]
+  jenkins:
+    base_url: https://jenkins.local
+  approval:
+    key_file: ${approvalKeyPath}
+    replay_file: ${join(directory, "replay.jsonl")}
+    audit_file: ${join(directory, "audit.jsonl")}
+`);
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ labels: { alertname: "Test", service: "infra", severity: "info" }, annotations: {}, startsAt: "2026-07-10T00:00:00Z", status: { state: "active" } }])))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ number: 1, result: "SUCCESS", building: false, timestamp: FIXED_NOW.getTime() })));
+    const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
+    await runtime.provider.activeAlerts({});
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://grafana:3000/api/alertmanager/grafana/api/v2/alerts");
+    expect(runtime.ci?.provider.constructor.name).toBe("JenkinsProvider");
+  });
+
   it("keeps runtime CI reads on Actions read and reruns on a separate write token", async () => {
     const appIdPath = join(directory, "github-app-id");
     const installationIdPath = join(directory, "github-installation-id");

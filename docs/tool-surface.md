@@ -50,6 +50,9 @@ markup, and length bounded by schema. Unknown annotations are dropped.
 `runbookRef` is a logical identifier by default; deployments may permit HTTPS
 URLs only from configured origins. Provider-controlled labels and annotations
 remain untrusted evidence even after normalization.
+The alerts backend may be vmalert or Grafana's embedded Alertmanager
+read-only API at `/api/alertmanager/grafana/api/v2/alerts`; both normalize to
+the same typed result.
 
 ## `observability.query_metrics`
 
@@ -113,6 +116,16 @@ bound to an allowlisted `owner/repository` and workflow file.
 The action calls only GitHub's `rerun-failed-jobs` endpoint. It does not accept
 commands, refs, workflow inputs, URLs, source changes, deployment targets, or
 secret values.
+Jenkins and Bitbucket adapters implement the same four typed read operations.
+Jenkins uses configured multibranch jobs; Bitbucket uses Basic auth from a
+0600 token file and also supports read-only commit, pull-request, and bounded
+diff evidence. The rerun operation is disabled for both adapters and performs
+no provider write.
+The challenge allowlist maps these jobs to their repositories: `planpal-backend-learner-6` →
+`academytools/planpal-backend-learner-6`, `planpal-web-client-learner-6` →
+`academytools/planpal-web-client-learner-6`, `planpalasix-config` →
+`academytools/planpal-config-6`, and `planpal-infra-6` →
+`academytools/planpal-infra-6`.
 
 ## Deferred Tools
 

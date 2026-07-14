@@ -11,6 +11,8 @@ import type {
   ObservabilityVisualProvider,
 } from "../providers/observability-provider.js";
 import { VictoriaMetricsProvider } from "../providers/victoriametrics-provider.js";
+import { JenkinsProvider } from "../providers/jenkins-provider.js";
+import { BitbucketProvider } from "../providers/bitbucket-provider.js";
 import { CIRepositorySchema, CIWorkflowSchema } from "../domain/ci-schemas.js";
 import { ApprovalTokenService, FileApprovalAuditStore } from "../ci/approval.js";
 import { createCIAllowlist } from "../ci/policy.js";
@@ -88,12 +90,21 @@ const GitHubAppSchema = z
 const CIConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
+    provider: z.enum(["github", "jenkins", "bitbucket"]).default("github"),
     allowlist: z.array(CIAllowlistEntrySchema).max(100).default([]),
     github: z
       .object({
         api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
         app: GitHubAppSchema.optional(),
       })
+      .strict()
+      .optional(),
+    jenkins: z
+      .object({ base_url: z.url() })
+      .strict()
+      .optional(),
+    bitbucket: z
+      .object({ base_url: z.url(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
       .strict()
       .optional(),
     approval: z
@@ -114,7 +125,7 @@ const RuntimeConfigSchema = z
     providers: z
       .object({
         metrics: HttpProviderSchema.extend({ type: z.literal("prometheus-compatible") }).strict(),
-        alerts: HttpProviderSchema.extend({ type: z.literal("vmalert") }).strict(),
+        alerts: HttpProviderSchema.extend({ type: z.enum(["vmalert", "grafana-alertmanager"]) }).strict(),
         grafana: HttpProviderSchema.extend({ type: z.literal("grafana") }).strict(),
       })
       .strict(),
@@ -210,6 +221,7 @@ export function loadRuntimeConfiguration(
   const provider = new VictoriaMetricsProvider({
     baseUrl: configuration.providers.metrics.base_url,
     alertsBaseUrl: configuration.providers.alerts.base_url,
+    alertsProvider: configuration.providers.alerts.type,
     fetch: options.fetch,
     queryTemplates,
     serviceHealth,
@@ -255,12 +267,52 @@ function buildCIConfiguration(
   options: LoadRuntimeConfigurationOptions,
 ): CIService | undefined {
   if (configuration?.enabled !== true) return undefined;
-  if (configuration.allowlist.length === 0 || configuration.github === undefined || configuration.approval === undefined) {
+  if (configuration.allowlist.length === 0 || configuration.approval === undefined) {
     throw new Error("Invalid CI runtime configuration");
   }
   const repositories = configuration.allowlist.map((entry) => entry.repo);
-  const app = configuration.github.app;
   const clock = options.clock ?? (() => new Date());
+  const provider = configuration.provider === "jenkins"
+    ? configuration.jenkins === undefined
+      ? (() => { throw new Error("Invalid CI runtime configuration"); })()
+      : new JenkinsProvider({
+          baseUrl: configuration.jenkins.base_url,
+          fetch: options.fetch,
+          ...(options.clock === undefined ? {} : { clock }),
+          maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
+        })
+    : configuration.provider === "bitbucket"
+      ? configuration.bitbucket === undefined
+        ? (() => { throw new Error("Invalid CI runtime configuration"); })()
+        : new BitbucketProvider({
+            baseUrl: configuration.bitbucket.base_url,
+            tokenFile: configuration.bitbucket.token_file,
+            ...(configuration.bitbucket.username === undefined ? {} : { username: configuration.bitbucket.username }),
+            fetch: options.fetch,
+            ...(options.clock === undefined ? {} : { clock }),
+            maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
+          })
+      : buildGitHubProvider(configuration, repositories, options, clock);
+  const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
+  const audit = new FileApprovalAuditStore({
+    replayPath: configuration.approval.replay_file,
+    auditPath: configuration.approval.audit_file,
+  });
+  return {
+    provider,
+    policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
+    approval: new ApprovalTokenService({ key, clock, audit }),
+  };
+}
+
+function buildGitHubProvider(
+  configuration: z.infer<typeof CIConfigSchema>,
+  repositories: readonly string[],
+  options: LoadRuntimeConfigurationOptions,
+  clock: Clock,
+): GitHubActionsProvider {
+  if (configuration.github === undefined) throw new Error("Invalid CI runtime configuration");
+  const app = configuration.github.app;
   const readTokenProvider = app === undefined
     ? undefined
     : app.installations !== undefined
@@ -312,20 +364,14 @@ function buildCIConfiguration(
           actionsPermission: "write",
         });
   if (readTokenProvider === undefined || writeTokenProvider === undefined) throw new Error("CI runtime configuration requires a GitHub App or token file");
-  const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
-  const audit = new FileApprovalAuditStore({ replayPath: configuration.approval.replay_file, auditPath: configuration.approval.audit_file });
-  return {
-    provider: new GitHubActionsProvider({
-      tokenProvider: readTokenProvider,
-      writeTokenProvider,
-      fetch: options.fetch,
-      ...(options.clock === undefined ? {} : { clock: options.clock }),
-      apiBaseUrl: configuration.github.api_base_url,
-      maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
-    }),
-    policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
-    approval: new ApprovalTokenService({ key, clock: options.clock ?? (() => new Date()), audit }),
-  };
+  return new GitHubActionsProvider({
+    tokenProvider: readTokenProvider,
+    writeTokenProvider,
+    fetch: options.fetch,
+    ...(options.clock === undefined ? {} : { clock }),
+    apiBaseUrl: configuration.github.api_base_url,
+    maxFreshnessMs: configuration.max_freshness_seconds * 1_000,
+  });
 }
 
 function readNumericSecretFile(path: string): string {

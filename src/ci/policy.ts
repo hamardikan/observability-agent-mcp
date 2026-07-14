@@ -2,6 +2,14 @@ export interface CIAllowlist {
   readonly workflowsByRepository: Readonly<Record<string, readonly string[]>>;
 }
 
+/** Exact challenge repositories and their Jenkins multibranch job names. */
+export const CHALLENGE_CI_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
+  "academytools/planpal-backend-learner-6": ["planpal-backend-learner-6"],
+  "academytools/planpal-web-client-learner-6": ["planpal-web-client-learner-6"],
+  "academytools/planpal-config-6": ["planpalasix-config"],
+  "academytools/planpal-infra-6": ["planpal-infra-6"],
+};
+
 export function createCIAllowlist(workflowsByRepository: Record<string, readonly string[]>): CIAllowlist {
   return {
     workflowsByRepository: Object.fromEntries(
