@@ -8,16 +8,21 @@ not.
 | --- | --- | --- |
 | npm package `@hamardikan/observability-agent-mcp` | stdio | Node.js 22 on Linux amd64 or arm64 |
 | npm package `@hamardikan/observability-agent-mcp` | private Streamable HTTP | Node.js 22 on Linux amd64 or arm64 |
-| OCI image `ghcr.io/hamardikan/observability-agent-mcp` | stdio or private Streamable HTTP | `linux/amd64`, `linux/arm64` |
+| OCI image `ghcr.io/hmrdkn-labs/pak-satpam` | stdio or private Streamable HTTP | `linux/amd64`, `linux/arm64` |
 | npm package or OCI image | private CI observer companion | Node.js 22 on Linux amd64 or arm64 |
 
 The public identifiers are compatibility contracts: npm package
 `@hamardikan/observability-agent-mcp`, CLI `observability-agent-mcp`, HTTP
 entrypoint `dist/http-cli.js`, OCI image
-`ghcr.io/hamardikan/observability-agent-mcp`, commit tag `sha-<commit>`, and
+`ghcr.io/hmrdkn-labs/pak-satpam`, commit tag `sha-<commit>`, and
 MCP schema version `1.0`. Portability work must not rename them.
 The optional observer CLI `observability-agent-mcp-observer` is additive and
 does not change the MCP server identity or tool contract.
+
+The private HTTP transport keeps the full server at `/mcp` and, when CI is
+configured, exposes an additional `/mcp/ci` surface containing exactly the five
+CI tools. The CI-only surface is portable across the same OCI architectures and
+fails closed with no route when CI is disabled.
 
 ## Stdio
 
@@ -65,7 +70,7 @@ node scripts/http-smoke.mjs http://127.0.0.1:8765/mcp ./runtime/mcp-token
 Use an immutable commit tag and select the target platform explicitly:
 
 ```bash
-IMAGE=ghcr.io/hamardikan/observability-agent-mcp:sha-<commit>
+IMAGE=ghcr.io/hmrdkn-labs/pak-satpam:sha-<commit>
 docker pull --platform linux/amd64 "$IMAGE"
 docker run --rm --platform linux/amd64 "$IMAGE" dist/cli.js
 docker pull --platform linux/arm64 "$IMAGE"

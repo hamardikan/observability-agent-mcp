@@ -15,7 +15,7 @@ function provider(fetch: typeof globalThis.fetch) {
 }
 
 describe("GitHub Actions adapter", () => {
-  it("mints a cached repository-scoped GitHub App token with Actions write permission", async () => {
+  it("mints a cached repository-scoped GitHub App token with Actions read permission by default", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const installationToken = `ghs_${"x".repeat(32)}`;
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
@@ -40,7 +40,7 @@ describe("GitHub Actions adapter", () => {
     expect(init).toMatchObject({ method: "POST", redirect: "error" });
     expect(JSON.parse(String(init && "body" in init ? init.body : "{}"))).toEqual({
       repositories: ["repo"],
-      permissions: { actions: "write" },
+      permissions: { actions: "read" },
     });
     await expect(tokenProvider.getToken("owner/other")).rejects.toMatchObject({ code: "permission" });
   });
@@ -258,6 +258,42 @@ describe("GitHub Actions adapter", () => {
       "https://api.github.com/repos/owner/repo/actions/runs/101/rerun-failed-jobs",
       expect.objectContaining({ method: "POST", redirect: "error" }),
     );
+  });
+
+  it("uses the read token for reads and the separate write token only for reruns", async () => {
+    const readTokenProvider = { getToken: vi.fn(async () => "github-read-token-123456") };
+    const writeTokenProvider = { getToken: vi.fn(async () => "github-write-token-123456") };
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 101,
+        status: "completed",
+        conclusion: "failure",
+        run_attempt: 1,
+        event: "workflow_dispatch",
+        head_branch: "main",
+        head_sha: "a".repeat(40),
+        created_at: "2026-07-10T00:00:00Z",
+        updated_at: "2026-07-10T00:00:00Z",
+      }), { headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }));
+    const adapter = new GitHubActionsProvider({
+      tokenProvider: readTokenProvider,
+      writeTokenProvider,
+      fetch,
+      clock: () => NOW,
+    });
+
+    await adapter.getWorkflowStatus({ repo: "owner/repo", workflow: "ci.yml", runId: "101" });
+    await adapter.rerunFailedWorkflow({ repo: "owner/repo", workflow: "ci.yml", runId: "101" });
+
+    expect(readTokenProvider.getToken).toHaveBeenCalledTimes(1);
+    expect(writeTokenProvider.getToken).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ authorization: "Bearer github-read-token-123456" }),
+    });
+    expect(fetch.mock.calls[1]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ authorization: "Bearer github-write-token-123456" }),
+    });
   });
 
   it("maps a failed rerun without exposing the provider response", async () => {

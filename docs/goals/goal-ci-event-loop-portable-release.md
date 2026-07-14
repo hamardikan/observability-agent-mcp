@@ -15,8 +15,9 @@
   approve once, rerun failed jobs only, then observe again.
 - Do not add shell execution, secret retrieval, deployment, workflow dispatch,
   arbitrary rerun, source mutation, or autonomous remediation tools.
-- Do not rename `@hamardikan/observability-agent-mcp` or
-  `ghcr.io/hamardikan/observability-agent-mcp`.
+- Keep the npm compatibility name `@hamardikan/observability-agent-mcp`; publish
+  the OCI image under the canonical repository identity
+  `ghcr.io/hmrdkn-labs/pak-satpam`.
 - Do not deploy or push while implementing or verifying the goal.
 
 ## Done When

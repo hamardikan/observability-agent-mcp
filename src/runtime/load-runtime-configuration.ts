@@ -261,7 +261,7 @@ function buildCIConfiguration(
   const repositories = configuration.allowlist.map((entry) => entry.repo);
   const app = configuration.github.app;
   const clock = options.clock ?? (() => new Date());
-  const tokenProvider = app === undefined
+  const readTokenProvider = app === undefined
     ? undefined
     : app.installations !== undefined
       ? MappedGitHubAppTokenProvider.fromFiles({
@@ -274,6 +274,7 @@ function buildCIConfiguration(
           fetch: options.fetch,
           clock,
           apiBaseUrl: configuration.github.api_base_url,
+          actionsPermission: "read",
         })
       : GitHubAppTokenProvider.fromPemFile({
           appId: readNumericSecretFile(app.app_id_file),
@@ -283,13 +284,40 @@ function buildCIConfiguration(
           fetch: options.fetch,
           clock,
           apiBaseUrl: configuration.github.api_base_url,
+          actionsPermission: "read",
         });
-  if (tokenProvider === undefined) throw new Error("CI runtime configuration requires a GitHub App or token file");
+  const writeTokenProvider = app === undefined
+    ? undefined
+    : app.installations !== undefined
+      ? MappedGitHubAppTokenProvider.fromFiles({
+          appIdFile: app.app_id_file,
+          pemKeyFile: app.pem_key_file,
+          installations: app.installations.map((entry) => "repo" in entry
+            ? { repo: entry.repo, installationIdFile: entry.installation_id_file }
+            : { owner: entry.owner, installationIdFile: entry.installation_id_file }),
+          repositories,
+          fetch: options.fetch,
+          clock,
+          apiBaseUrl: configuration.github.api_base_url,
+          actionsPermission: "write",
+        })
+      : GitHubAppTokenProvider.fromPemFile({
+          appId: readNumericSecretFile(app.app_id_file),
+          installationId: readNumericSecretFile(app.installation_id_file ?? ""),
+          pemKeyFile: app.pem_key_file,
+          allowedRepositories: repositories,
+          fetch: options.fetch,
+          clock,
+          apiBaseUrl: configuration.github.api_base_url,
+          actionsPermission: "write",
+        });
+  if (readTokenProvider === undefined || writeTokenProvider === undefined) throw new Error("CI runtime configuration requires a GitHub App or token file");
   const key = ApprovalTokenService.readKeyFile(configuration.approval.key_file);
   const audit = new FileApprovalAuditStore({ replayPath: configuration.approval.replay_file, auditPath: configuration.approval.audit_file });
   return {
     provider: new GitHubActionsProvider({
-      tokenProvider,
+      tokenProvider: readTokenProvider,
+      writeTokenProvider,
       fetch: options.fetch,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
       apiBaseUrl: configuration.github.api_base_url,

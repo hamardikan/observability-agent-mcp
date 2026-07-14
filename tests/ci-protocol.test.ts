@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ApprovalTokenService, InMemoryApprovalAuditStore } from "../src/ci/approval.js";
 import { createCIAllowlist } from "../src/ci/policy.js";
 import { GitHubActionsProvider } from "../src/providers/github-actions-provider.js";
-import { createObservabilityServer } from "../src/server/create-server.js";
+import { createCIServer, createObservabilityServer } from "../src/server/create-server.js";
 import { FakeObservabilityProvider } from "../src/providers/fake-provider.js";
 
 const NOW = new Date("2026-07-10T00:00:00.000Z");
@@ -69,6 +69,27 @@ describe("CI MCP contract", () => {
       destructiveHint: true,
       idempotentHint: false,
     });
+    await client.close();
+    await server.close();
+  });
+
+  it("exposes exactly the CI tools from the CI-only server", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createCIServer({ ci: ci(viFetch([])), clock: () => NOW });
+    const client = new Client({ name: "goal18-ci-only-test", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const result = await client.listTools();
+
+    expect(result.tools.map((tool) => tool.name)).toEqual([
+      "ci.workflow_status",
+      "ci.failed_job_analysis",
+      "ci.log_evidence",
+      "ci.remediation_plan",
+      "ci.rerun_failed_workflow",
+    ]);
+    expect(result.tools.every((tool) => tool.name.startsWith("ci."))).toBe(true);
     await client.close();
     await server.close();
   });

@@ -26,6 +26,7 @@ const MAX_RESPONSE_BYTES = 2 * 1_024 * 1_024;
 export interface GitHubActionsProviderOptions {
   readonly token?: string;
   readonly tokenProvider?: CITokenProvider;
+  readonly writeTokenProvider?: CITokenProvider;
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly apiBaseUrl?: string;
@@ -34,6 +35,7 @@ export interface GitHubActionsProviderOptions {
 
 export class GitHubActionsProvider implements CIProvider {
   readonly #tokenProvider: CITokenProvider;
+  readonly #writeTokenProvider: CITokenProvider | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
   readonly #apiBaseUrl: string;
@@ -42,6 +44,7 @@ export class GitHubActionsProvider implements CIProvider {
   constructor(options: GitHubActionsProviderOptions) {
     if (options.token === undefined && options.tokenProvider === undefined) throw new Error("GitHub token provider is required");
     this.#tokenProvider = options.tokenProvider ?? new StaticGitHubTokenProvider(options.token ?? "");
+    this.#writeTokenProvider = options.writeTokenProvider ?? (options.token === undefined ? undefined : this.#tokenProvider);
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#apiBaseUrl = trustedGitHubApiBase(options.apiBaseUrl);
@@ -158,7 +161,9 @@ export class GitHubActionsProvider implements CIProvider {
   }
 
   private async request(path: string, method: "GET" | "POST", repository: string, redirect: "error" | "manual" = "error"): Promise<Response> {
-    const token = await this.#tokenProvider.getToken(repository);
+    const tokenProvider = method === "POST" ? this.#writeTokenProvider : this.#tokenProvider;
+    if (tokenProvider === undefined) throw new CIProviderError("permission");
+    const token = await tokenProvider.getToken(repository);
     const init: RequestInit = {
       method,
       headers: {

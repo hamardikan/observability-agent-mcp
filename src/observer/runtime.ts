@@ -7,7 +7,7 @@ import { GitHubActionsProvider } from "../providers/github-actions-provider.js";
 import { loadObserverConfiguration, observerRuntimeConfig, readObserverSecretFile, type ObserverConfig } from "./config.js";
 import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-token-provider.js";
 import { z } from "zod";
-import { HermesDelivery, ObserverDeliveryError, type ObserverDeliveryRoute } from "./delivery.js";
+import { HermesDelivery, type ObserverDeliveryRoute } from "./delivery.js";
 import { FileObserverStateStore, type ObserverSeenRecord, type ObserverStateDocument, type ObserverStateStore, type ObserverTargetState } from "./state.js";
 
 export type ObserverOutcome = "success" | "failure" | "cancelled" | "timed_out" | "action_required" | "skipped" | "neutral" | "stale" | "unavailable" | "malformed";
@@ -31,6 +31,7 @@ export interface ObserverEvent {
   readonly workflow: string;
   readonly runId: string;
   readonly runAttempt: number;
+  readonly terminalConclusion: CIWorkflowRun["conclusion"];
   readonly outcome: ObserverOutcome;
   readonly freshness: "fresh" | "stale";
   readonly updatedAt: string;
@@ -67,6 +68,10 @@ type MutableObserverState = {
   targets: Record<string, ObserverTargetState>;
   updatedAt: string;
 };
+
+const PROVIDER_BACKOFF_BASE_MS = 5_000;
+const PROVIDER_BACKOFF_MAX_MS = 5 * 60_000;
+const DEFAULT_INITIAL_LOOKBACK_MS = 24 * 60 * 60_000;
 
 export class InMemoryObserverMetrics {
   #polls = 0;
@@ -154,76 +159,151 @@ export class ObserverRuntime {
       for (const target of targets(this.#config)) {
         const targetKey = targetKeyFor(target.repo, target.workflow);
         const previous = mutableState.targets[targetKey] ?? { page: 1, seen: {} };
-        // GitHub only filters workflow runs by creation time. Re-scan the newest
-        // bounded terminal pages so long-running runs cannot fall behind a
-        // creation-time cursor; durable seen records provide deduplication.
-        let page = 1;
-        let hasMore = false;
-        const runs: CIWorkflowRun[] = [];
+        const initialPage = previous.page ?? 1;
+        const scanCursor = previous.cursor ?? new Date(now.getTime() - (this.#config.initialLookbackMs ?? DEFAULT_INITIAL_LOOKBACK_MS)).toISOString();
+        const backoffUntil = previous.backoffUntil === undefined ? undefined : Date.parse(previous.backoffUntil);
+        if (backoffUntil !== undefined && Number.isFinite(backoffUntil) && backoffUntil > now.getTime()) {
+          this.#metrics.recordTargetError("unavailable");
+          errors.push({ repo: target.repo, workflow: target.workflow, outcome: "unavailable" });
+          continue;
+        }
+
+        let backlogPage = initialPage;
+        let backlogPagesFetched = 0;
+        let backlogHasMore = false;
         let targetFailedDelivery = false;
+        let targetTruncated = false;
+        let currentTarget: ObserverTargetState = { ...previous, page: backlogPage, cursor: scanCursor };
         try {
-          do {
-            const result = await this.#provider.listWorkflowRuns({
+          const attempted = new Set<string>();
+          const processRuns = async (runs: readonly CIWorkflowRun[]): Promise<boolean> => {
+            for (const candidate of runs) {
+              let run: CIWorkflowRun;
+              try { run = ObserverRunSchema.parse(candidate); } catch {
+                this.#metrics.recordTargetError("malformed");
+                errors.push({ repo: target.repo, workflow: target.workflow, outcome: "malformed" });
+                continue;
+              }
+              if (run.repository !== target.repo || run.workflow !== target.workflow) {
+                this.#metrics.recordTargetError("malformed");
+                errors.push({ repo: target.repo, workflow: target.workflow, outcome: "malformed" });
+                continue;
+              }
+              if (run.status !== "completed") continue;
+              const eventId = observerEventId(run);
+              const prior = (mutableState.targets[targetKey] ?? currentTarget).seen[eventId];
+              if (attempted.has(eventId)) continue;
+              attempted.add(eventId);
+              const statusDelivered = prior?.statusDelivery === "delivered" || prior?.delivery === "delivered";
+              const analysisRequired = isAnalysisConclusion(run.conclusion);
+              const analysisDelivered = !analysisRequired || prior?.analysisDelivery === "delivered";
+              if (statusDelivered && analysisDelivered) continue;
+              const outcome = outcomeForRun(run, now, this.#config.staleAfterMs);
+              this.#metrics.recordObservation(outcome);
+              observed.push({ eventId, runId: run.id, outcome });
+              if (!statusDelivered) {
+                const statusEvent = await this.buildEvent(run, outcome, now, false);
+                currentTarget = markSeen(mutableState.targets[targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
+                mutableState.targets[targetKey] = currentTarget;
+                this.#state.save(withUpdatedAt(mutableState, now));
+                try {
+                  await this.#deliver(serializeObserverEvent(statusEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "status"), "success");
+                  currentTarget = markSeen(mutableState.targets[targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "delivered", deliveredAt: now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: now.toISOString() });
+                  mutableState.targets[targetKey] = currentTarget;
+                  this.#state.save(withUpdatedAt(mutableState, now));
+                  this.#metrics.recordDelivery();
+                  delivered += 1;
+                } catch {
+                  this.#metrics.recordDeliveryFailure();
+                  pollDeliveryFailures += 1;
+                  return true;
+                }
+              }
+              if (analysisRequired && !analysisDelivered) {
+                const analysisEvent = await this.buildEvent(run, outcome, now, true);
+                currentTarget = markSeen(mutableState.targets[targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisDelivery: "pending" });
+                mutableState.targets[targetKey] = currentTarget;
+                this.#state.save(withUpdatedAt(mutableState, now));
+                try {
+                  await this.#deliver(serializeObserverEvent(analysisEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "analysis"), "analysis");
+                  currentTarget = markSeen(mutableState.targets[targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisDelivery: "delivered", analysisDeliveredAt: now.toISOString() });
+                  mutableState.targets[targetKey] = currentTarget;
+                  this.#state.save(withUpdatedAt(mutableState, now));
+                  this.#metrics.recordDelivery();
+                  delivered += 1;
+                } catch {
+                  this.#metrics.recordDeliveryFailure();
+                  pollDeliveryFailures += 1;
+                  return true;
+                }
+              }
+            }
+            return false;
+          };
+
+          // The hot lane is always unfiltered page one. GitHub's created-time
+          // filter cannot see a run created long ago that only became terminal.
+          const hotResult = await this.#provider.listWorkflowRuns({
+            repo: target.repo,
+            workflow: target.workflow,
+            page: 1,
+            perPage: this.#config.pageSize,
+          });
+          targetFailedDelivery = await processRuns(hotResult.runs);
+
+          // The backlog lane owns durable page/cursor state. Its filter is
+          // computed once and reused unchanged across every page in the scan.
+          const backlogCreatedAfter = createdAfterWithOverlap(scanCursor, this.#config.overlapMs);
+          while (!targetFailedDelivery && backlogPagesFetched < this.#config.maxPages) {
+            currentTarget = { ...currentTarget, page: backlogPage, cursor: scanCursor };
+            mutableState.targets[targetKey] = currentTarget;
+            this.#state.save(withUpdatedAt(mutableState, now));
+            const listInput: {
+              repo: string;
+              workflow: string;
+              page: number;
+              perPage: number;
+              createdAfter?: string;
+            } = {
               repo: target.repo,
               workflow: target.workflow,
-              page,
+              page: backlogPage,
               perPage: this.#config.pageSize,
-            });
-            runs.push(...result.runs);
-            hasMore = result.hasMore;
-            page = result.nextPage ?? page + 1;
-          } while (hasMore && page <= this.#config.maxPages);
-          if (hasMore) truncatedTargets += 1;
+            };
+            if (backlogCreatedAfter !== undefined) listInput.createdAfter = backlogCreatedAfter;
+            const result = await this.#provider.listWorkflowRuns(listInput);
+            backlogPagesFetched += 1;
+            backlogHasMore = result.hasMore;
+            const nextPage = result.nextPage ?? backlogPage + 1;
+            if (backlogHasMore && (!Number.isInteger(nextPage) || nextPage <= backlogPage)) throw new CIProviderError("malformed");
+            targetFailedDelivery = await processRuns(result.runs);
+            if (targetFailedDelivery || !backlogHasMore) break;
+            backlogPage = nextPage;
+          }
+          if (targetFailedDelivery) {
+            mutableState.targets[targetKey] = { ...currentTarget, page: backlogPage };
+            this.#state.save(withUpdatedAt(mutableState, now));
+          } else if (backlogHasMore) {
+            targetTruncated = true;
+            mutableState.targets[targetKey] = { ...currentTarget, page: backlogPage };
+            this.#state.save(withUpdatedAt(mutableState, now));
+          } else {
+            const cleanTarget = withoutBackoff({ ...currentTarget, cursor: now.toISOString(), page: 1 });
+            mutableState.targets[targetKey] = pruneSeen(cleanTarget);
+            this.#state.save(withUpdatedAt(mutableState, now));
+          }
         } catch (error) {
           const outcome = providerErrorOutcome(error);
           this.#metrics.recordTargetError(outcome);
           errors.push({ repo: target.repo, workflow: target.workflow, outcome });
+          const persisted = { ...currentTarget, page: backlogPage };
+          mutableState.targets[targetKey] = isProviderBackoffError(error)
+            ? withProviderBackoff(persisted, now)
+            : persisted;
+          this.#state.save(withUpdatedAt(mutableState, now));
           continue;
         }
-
-        for (const candidate of runs) {
-          let run: CIWorkflowRun;
-          try { run = ObserverRunSchema.parse(candidate); } catch {
-            this.#metrics.recordTargetError("malformed");
-            errors.push({ repo: target.repo, workflow: target.workflow, outcome: "malformed" });
-            continue;
-          }
-          if (run.repository !== target.repo || run.workflow !== target.workflow) {
-            this.#metrics.recordTargetError("malformed");
-            errors.push({ repo: target.repo, workflow: target.workflow, outcome: "malformed" });
-            continue;
-          }
-          if (run.status !== "completed") continue;
-          const eventId = observerEventId(run);
-          const prior = (mutableState.targets[targetKey] ?? previous).seen[eventId];
-          const outcome = outcomeForRun(run, now, this.#config.staleAfterMs);
-          this.#metrics.recordObservation(outcome);
-          observed.push({ eventId, runId: run.id, outcome });
-          if (prior?.delivery === "delivered") continue;
-          const event = await this.buildEvent(run, outcome, now);
-          mutableState.targets[targetKey] = markSeen(mutableState.targets[targetKey] ?? previous, eventId, { outcome, observedAt: event.observedAt, delivery: "pending" });
-          this.#state.save(withUpdatedAt(mutableState, now));
-          try {
-            await this.#deliver(serializeObserverEvent(event, this.#config.maxPayloadBytes), eventId, deliveryRoute(outcome));
-            mutableState.targets[targetKey] = markSeen(mutableState.targets[targetKey] ?? previous, eventId, { outcome, observedAt: event.observedAt, delivery: "delivered", deliveredAt: now.toISOString() });
-            this.#state.save(withUpdatedAt(mutableState, now));
-            this.#metrics.recordDelivery();
-            delivered += 1;
-          } catch (error) {
-            targetFailedDelivery = true;
-            pollDeliveryFailures += 1;
-            this.#metrics.recordDeliveryFailure();
-            if (error instanceof ObserverDeliveryError) continue;
-          }
-        }
-        if (!targetFailedDelivery && !hasMore) {
-          mutableState.targets[targetKey] = { ...(mutableState.targets[targetKey] ?? previous), cursor: now.toISOString(), page: 1 };
-          mutableState.targets[targetKey] = pruneSeen(mutableState.targets[targetKey]);
-          this.#state.save(withUpdatedAt(mutableState, now));
-        } else if (hasMore) {
-          mutableState.targets[targetKey] = { ...(mutableState.targets[targetKey] ?? previous), page: 1 };
-          this.#state.save(withUpdatedAt(mutableState, now));
-        }
+        if (targetTruncated) truncatedTargets += 1;
       }
       this.#metrics.finishPoll({ targetErrors: errors.length, truncatedTargets, deliveryFailures: pollDeliveryFailures });
       return { skipped: false, observed, delivered, errors, truncatedTargets };
@@ -252,12 +332,12 @@ export class ObserverRuntime {
 
   private targetCount(): number { return targets(this.#config).length; }
 
-  private async buildEvent(run: CIWorkflowRun, outcome: ObserverOutcome, now: Date): Promise<ObserverEvent> {
+  private async buildEvent(run: CIWorkflowRun, outcome: ObserverOutcome, now: Date, includeAnalysis: boolean): Promise<ObserverEvent> {
     const warnings: Array<{ code: string; message: string }> = [];
     let analysis: unknown;
     let evidence: unknown[] | undefined;
     let remediation: unknown;
-    if (["failure", "cancelled", "timed_out", "action_required"].includes(outcome)) {
+    if (includeAnalysis && isAnalysisConclusion(run.conclusion)) {
       const input = { repo: run.repository, workflow: run.workflow, runId: run.id };
       try {
         const result = await this.#provider.getFailedJobAnalysis(input);
@@ -307,6 +387,7 @@ export class ObserverRuntime {
       workflow: run.workflow,
       runId: run.id,
       runAttempt: run.runAttempt,
+      terminalConclusion: run.conclusion,
       outcome,
       freshness: outcome === "stale" ? "stale" : "fresh",
       updatedAt: run.updatedAt,
@@ -418,11 +499,43 @@ function targets(config: ObserverConfig): Array<{ repo: string; workflow: string
 
 function targetKeyFor(repo: string, workflow: string): string { return `${repo}\u001f${workflow}`; }
 
+function createdAfterWithOverlap(cursor: string, overlapMs: number): string | undefined {
+  const cursorMs = Date.parse(cursor);
+  return Number.isFinite(cursorMs) ? new Date(cursorMs - overlapMs).toISOString() : undefined;
+}
+
+function isAnalysisConclusion(conclusion: CIWorkflowRun["conclusion"]): boolean {
+  return conclusion === "failure" || conclusion === "cancelled" || conclusion === "timed_out" || conclusion === "action_required";
+}
+
 function outcomeForProviderError(error: unknown): "unavailable" | "malformed" {
   return error instanceof CIProviderError && error.code === "malformed" || error !== null && typeof error === "object" && (error as { code?: unknown }).code === "malformed" ? "malformed" : "unavailable";
 }
 
 const providerErrorOutcome = outcomeForProviderError;
+
+function isProviderBackoffError(error: unknown): boolean {
+  if (error instanceof CIProviderError) return error.code === "unavailable";
+  if (error === null || typeof error !== "object") return false;
+  const value = error as { code?: unknown; status?: unknown };
+  return value.code === "unavailable" || value.code === "rate_limited" || value.code === "too_many_requests" || value.status === 429;
+}
+
+function withProviderBackoff(target: ObserverTargetState, now: Date): ObserverTargetState {
+  const delay = Math.min(PROVIDER_BACKOFF_MAX_MS, Math.max(PROVIDER_BACKOFF_BASE_MS, (target.backoffMs ?? PROVIDER_BACKOFF_BASE_MS / 2) * 2));
+  return {
+    ...target,
+    backoffMs: delay,
+    backoffUntil: new Date(now.getTime() + delay).toISOString(),
+  };
+}
+
+function withoutBackoff(target: ObserverTargetState): ObserverTargetState {
+  const next = { ...target };
+  delete next.backoffMs;
+  delete next.backoffUntil;
+  return next;
+}
 
 function serializeObserverEvent(event: ObserverEvent, maxBytes: number): string {
   const redacted = redactMetadata(event) as Record<string, unknown>;
@@ -432,17 +545,29 @@ function serializeObserverEvent(event: ObserverEvent, maxBytes: number): string 
   redacted.warnings = [...(Array.isArray(redacted.warnings) ? redacted.warnings : []), { code: "payload_truncated", message: "Bounded evidence omitted" }];
   body = JSON.stringify(redacted);
   if (Buffer.byteLength(body, "utf8") <= maxBytes) return body;
-  return JSON.stringify({ schemaVersion: "1.0", type: "ci.run.observed", eventId: event.eventId, observedAt: event.observedAt, repo: event.repo, workflow: event.workflow, runId: event.runId, runAttempt: event.runAttempt, outcome: event.outcome, freshness: event.freshness, updatedAt: event.updatedAt, warnings: [{ code: "payload_truncated", message: "Bounded evidence omitted" }] });
+  return JSON.stringify({ schemaVersion: "1.0", type: "ci.run.observed", eventId: event.eventId, observedAt: event.observedAt, repo: event.repo, workflow: event.workflow, runId: event.runId, runAttempt: event.runAttempt, terminalConclusion: event.terminalConclusion, outcome: event.outcome, freshness: event.freshness, updatedAt: event.updatedAt, warnings: [{ code: "payload_truncated", message: "Bounded evidence omitted" }] });
 }
 
-function markSeen(target: ObserverTargetState, eventId: string, record: ObserverSeenRecord): ObserverTargetState {
-  return { ...target, seen: { ...target.seen, [eventId]: record } };
+function deliveryEventId(eventId: string, route: "status" | "analysis"): string {
+  return `${eventId}:${route}`;
+}
+
+function markSeen(target: ObserverTargetState, eventId: string, record: Pick<ObserverSeenRecord, "outcome" | "observedAt"> & Partial<ObserverSeenRecord>): ObserverTargetState {
+  const previous = target.seen[eventId];
+  const merged: ObserverSeenRecord = {
+    ...previous,
+    ...record,
+    outcome: record.outcome,
+    observedAt: record.observedAt,
+    delivery: record.delivery ?? previous?.delivery ?? "pending",
+  };
+  return { ...target, seen: { ...target.seen, [eventId]: merged } };
 }
 
 function pruneSeen(target: ObserverTargetState): ObserverTargetState {
   const entries = Object.entries(target.seen);
   if (entries.length <= 1_000) return target;
-  const retained = entries.filter(([, record]) => record.delivery === "pending").concat(entries.filter(([, record]) => record.delivery === "delivered").slice(-900));
+  const retained = entries.filter(([, record]) => record.delivery === "pending" || record.analysisDelivery === "pending").concat(entries.filter(([, record]) => record.delivery === "delivered" && record.analysisDelivery !== "pending").slice(-900));
   return { ...target, seen: Object.fromEntries(retained) };
 }
 
@@ -452,10 +577,6 @@ function withUpdatedAt(state: ObserverStateDocument, now: Date): ObserverStateDo
 
 function cloneState(state: ObserverStateDocument): MutableObserverState {
   return JSON.parse(JSON.stringify(state)) as MutableObserverState;
-}
-
-function deliveryRoute(outcome: ObserverOutcome): ObserverDeliveryRoute {
-  return ["failure", "cancelled", "timed_out", "action_required"].includes(outcome) ? "analysis" : "success";
 }
 
 const ObserverRunSchema = z.object({

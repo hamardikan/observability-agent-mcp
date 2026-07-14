@@ -132,10 +132,20 @@ npm run validate
 The public non-root image supports `linux/amd64` and `linux/arm64`:
 
 ```text
-ghcr.io/hamardikan/observability-agent-mcp
+ghcr.io/hmrdkn-labs/pak-satpam
 ```
 
 Production deployments should pin the image by immutable `@sha256:` digest.
+
+The private HTTP runtime exposes two authenticated MCP surfaces when CI is
+configured:
+
+- `/mcp` preserves the complete observability and CI contract;
+- `/mcp/ci` exposes only the four read-only CI tools and the approval-gated
+  `ci.rerun_failed_workflow` action.
+
+`/mcp/ci` is absent when CI is disabled. This lets an agent platform attach a
+CI-only toolset without relying on prompts to hide unrelated tools.
 For a local build and stdio smoke run:
 
 ```bash

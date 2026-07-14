@@ -118,7 +118,7 @@ hermes:
         "https://api.github.com/app/installations/456/access_tokens",
         "https://api.github.com/app/installations/789/access_tokens",
       ]);
-      expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({ permissions: { actions: "write" } });
+      expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({ permissions: { actions: "read" } });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

@@ -109,6 +109,31 @@ describe("private runtime configuration", () => {
     expect(runtime.ci).toBeDefined();
   });
 
+  it("keeps runtime CI reads on Actions read and reruns on a separate write token", async () => {
+    const appIdPath = join(directory, "github-app-id");
+    const installationIdPath = join(directory, "github-installation-id");
+    const privateKeyPath = join(directory, "github-private-key.pem");
+    const approvalKeyPath = join(directory, "approval-key");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    writeFileSync(appIdPath, "123\n", { mode: 0o600 });
+    writeFileSync(installationIdPath, "456\n", { mode: 0o600 });
+    writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs1", format: "pem" }), { mode: 0o600 });
+    writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
+    writeFileSync(configPath, `${VALID_CONFIG}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [ci.yml]\n  github:\n    api_base_url: https://api.github.com\n    app:\n      app_id_file: ${appIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n`);
+    const ciFetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "read-token-123456789", expires_at: "2026-07-10T01:00:00Z" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 101, status: "completed", conclusion: "failure", run_attempt: 1, event: "workflow_dispatch", head_branch: "main", head_sha: "a".repeat(40), created_at: "2026-07-10T00:00:00Z", updated_at: "2026-07-10T00:00:00Z" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "write-token-123456789", expires_at: "2026-07-10T01:00:00Z" })))
+      .mockResolvedValueOnce(new Response(null, { status: 201 }));
+
+    const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch: ciFetch, clock: () => FIXED_NOW });
+    await runtime.ci?.provider.getWorkflowStatus({ repo: "owner/repo", workflow: "ci.yml", runId: "101" });
+    await runtime.ci?.provider.rerunFailedWorkflow({ repo: "owner/repo", workflow: "ci.yml", runId: "101", runAttempt: 1, headSha: "a".repeat(40) });
+
+    expect(JSON.parse(String(ciFetch.mock.calls[0]?.[1]?.body))).toMatchObject({ permissions: { actions: "read" } });
+    expect(JSON.parse(String(ciFetch.mock.calls[2]?.[1]?.body))).toMatchObject({ permissions: { actions: "write" } });
+  });
+
   it("rejects contradictory legacy and mapped GitHub App installation modes", () => {
     const appIdPath = join(directory, "github-app-id");
     const installationIdPath = join(directory, "github-installation-id");

@@ -9,12 +9,18 @@ export interface ObserverSeenRecord {
   readonly observedAt: string;
   readonly delivery: ObserverDeliveryState;
   readonly deliveredAt?: string;
+  readonly statusDelivery?: ObserverDeliveryState;
+  readonly statusDeliveredAt?: string;
+  readonly analysisDelivery?: ObserverDeliveryState;
+  readonly analysisDeliveredAt?: string;
 }
 
 export interface ObserverTargetState {
   readonly cursor?: string;
   readonly page: number;
   readonly seen: Readonly<Record<string, ObserverSeenRecord>>;
+  readonly backoffUntil?: string;
+  readonly backoffMs?: number;
 }
 
 export interface ObserverStateDocument {
@@ -122,11 +128,17 @@ function isStateDocument(value: unknown): value is ObserverStateDocument {
     const record = target as Record<string, unknown>;
     if (record.page !== undefined && (typeof record.page !== "number" || !Number.isInteger(record.page) || record.page < 1)) return false;
     if (record.cursor !== undefined && typeof record.cursor !== "string") return false;
+    if (record.backoffUntil !== undefined && typeof record.backoffUntil !== "string") return false;
+    if (record.backoffMs !== undefined && (typeof record.backoffMs !== "number" || !Number.isInteger(record.backoffMs) || record.backoffMs < 1 || record.backoffMs > 5 * 60_000)) return false;
     if (record.seen === null || typeof record.seen !== "object" || Array.isArray(record.seen)) return false;
     for (const seen of Object.values(record.seen as Record<string, unknown>)) {
       if (seen === null || typeof seen !== "object" || Array.isArray(seen)) return false;
       const item = seen as Record<string, unknown>;
       if (typeof item.outcome !== "string" || typeof item.observedAt !== "string" || !["pending", "delivered"].includes(String(item.delivery))) return false;
+      if (item.statusDelivery !== undefined && !["pending", "delivered"].includes(String(item.statusDelivery))) return false;
+      if (item.statusDeliveredAt !== undefined && typeof item.statusDeliveredAt !== "string") return false;
+      if (item.analysisDelivery !== undefined && !["pending", "delivered"].includes(String(item.analysisDelivery))) return false;
+      if (item.analysisDeliveredAt !== undefined && typeof item.analysisDeliveredAt !== "string") return false;
     }
   }
   return true;

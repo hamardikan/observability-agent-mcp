@@ -38,9 +38,13 @@ Implemented locally:
 - Pre-output log redaction, strict allowlists, freshness checks, GitHub App
   installation auth, atomic replay protection, and metadata-only audit events.
 - An operator-only approval CLI and controlled first-attempt failure workflow.
+- A dedicated authenticated `/mcp/ci` surface containing exactly four read
+  tools plus the approval-gated failed-job rerun action.
+- Separate short-lived GitHub App tokens for Actions read operations and the
+  approval-gated Actions write operation.
 
 The public multi-architecture OCI image is published at
-`ghcr.io/hamardikan/observability-agent-mcp`; production uses the immutable
+`ghcr.io/hmrdkn-labs/pak-satpam`; production uses the immutable
 digest recorded by the private infra evidence. Live edge deployment and
 controlled Discord evidence remain private-infra responsibilities.
 

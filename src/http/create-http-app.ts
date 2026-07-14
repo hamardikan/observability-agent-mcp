@@ -10,7 +10,7 @@ import type {
   ObservabilityProvider,
   ObservabilityVisualProvider,
 } from "../providers/observability-provider.js";
-import { createObservabilityServer } from "../server/create-server.js";
+import { createCIServer, createObservabilityServer } from "../server/create-server.js";
 import type { CIService } from "../ci/service.js";
 
 export interface CreateObservabilityHttpAppOptions {
@@ -41,47 +41,57 @@ export function createObservabilityHttpApp(options: CreateObservabilityHttpAppOp
     response.status(200).json({ status: "ok" });
   });
 
-  app.use("/mcp", bearerAuthentication(options.bearerToken));
-  app.post("/mcp", async (request, response) => {
-    const server = createObservabilityServer({
-      provider: options.provider,
+  const ci = options.ci;
+  if (ci !== undefined) {
+    registerMcpEndpoint("/mcp/ci", () => createCIServer({
+      ci,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
-      ...(options.visualAllowlist === undefined
-        ? {}
-        : { visualAllowlist: options.visualAllowlist }),
-      ...(options.visualProvider === undefined ? {} : { visualProvider: options.visualProvider }),
-      ...(options.ci === undefined ? {} : { ci: options.ci }),
-    });
-    const transport = new StreamableHTTPServerTransport();
-    let closed = false;
-    const close = async () => {
-      if (closed) return;
-      closed = true;
-      await transport.close();
-      await server.close();
-    };
-    response.once("close", () => void close());
-
-    try {
-      // SDK 1.29's Node transport declaration is not exactOptionalPropertyTypes-clean.
-      await server.connect(transport as unknown as Transport);
-      await transport.handleRequest(request, response, request.body);
-    } catch {
-      await close();
-      if (!response.headersSent) {
-        response.status(500).json({
-          jsonrpc: "2.0",
-          error: { code: -32603, message: "Internal server error" },
-          id: null,
-        });
-      }
-    }
-  });
-
-  app.get("/mcp", methodNotAllowed);
-  app.delete("/mcp", methodNotAllowed);
+    }));
+  }
+  registerMcpEndpoint("/mcp", () => createObservabilityServer({
+    provider: options.provider,
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.visualAllowlist === undefined
+      ? {}
+      : { visualAllowlist: options.visualAllowlist }),
+    ...(options.visualProvider === undefined ? {} : { visualProvider: options.visualProvider }),
+    ...(ci === undefined ? {} : { ci }),
+  }));
 
   return app;
+
+  function registerMcpEndpoint(path: string, createServer: () => ReturnType<typeof createObservabilityServer>): void {
+    app.use(path, bearerAuthentication(options.bearerToken));
+    app.post(path, async (request, response) => {
+      const server = createServer();
+      const transport = new StreamableHTTPServerTransport();
+      let closed = false;
+      const close = async () => {
+        if (closed) return;
+        closed = true;
+        await transport.close();
+        await server.close();
+      };
+      response.once("close", () => void close());
+
+      try {
+        // SDK 1.29's Node transport declaration is not exactOptionalPropertyTypes-clean.
+        await server.connect(transport as unknown as Transport);
+        await transport.handleRequest(request, response, request.body);
+      } catch {
+        await close();
+        if (!response.headersSent) {
+          response.status(500).json({
+            jsonrpc: "2.0",
+            error: { code: -32603, message: "Internal server error" },
+            id: null,
+          });
+        }
+      }
+    });
+    app.get(path, methodNotAllowed);
+    app.delete(path, methodNotAllowed);
+  }
 }
 
 function bearerAuthentication(expectedToken: string) {

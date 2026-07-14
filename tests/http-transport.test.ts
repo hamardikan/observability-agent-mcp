@@ -6,6 +6,9 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createObservabilityHttpApp } from "../src/http/create-http-app.js";
+import { ApprovalTokenService, InMemoryApprovalAuditStore } from "../src/ci/approval.js";
+import { createCIAllowlist } from "../src/ci/policy.js";
+import { GitHubActionsProvider } from "../src/providers/github-actions-provider.js";
 import { FakeObservabilityProvider } from "../src/providers/fake-provider.js";
 
 const TEST_CREDENTIAL = "goal11-test-bearer-token";
@@ -53,6 +56,43 @@ describe("private Streamable HTTP transport", () => {
     expect(health).not.toMatchObject({ isError: true });
   });
 
+  it("serves exactly the five CI tools at /mcp/ci and no observability tools", async () => {
+    const app = createObservabilityHttpApp({
+      provider: new FakeObservabilityProvider(() => FIXED_NOW),
+      ci: {
+        provider: new GitHubActionsProvider({ token: "github-token-for-http-test", fetch: globalThis.fetch, clock: () => FIXED_NOW }),
+        policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
+        approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
+      },
+      bearerToken: TEST_CREDENTIAL,
+      host: "127.0.0.1",
+      allowedHosts: ["127.0.0.1"],
+      clock: () => FIXED_NOW,
+    });
+    const ciServer = createServer(app);
+    await new Promise<void>((resolve) => ciServer.listen(0, "127.0.0.1", resolve));
+    const address = ciServer.address() as AddressInfo;
+    const ciBaseUrl = new URL(`http://127.0.0.1:${address.port}`);
+    const transport = new StreamableHTTPClientTransport(new URL("/mcp/ci", ciBaseUrl), {
+      requestInit: { headers: { Authorization: `Bearer ${TEST_CREDENTIAL}` } },
+    });
+    const client = new Client({ name: "goal18-http-ci-test", version: "1.0.0" });
+
+    await client.connect(transport as unknown as Transport);
+    const tools = await client.listTools();
+
+    expect(tools.tools.map((tool) => tool.name)).toEqual([
+      "ci.workflow_status",
+      "ci.failed_job_analysis",
+      "ci.log_evidence",
+      "ci.remediation_plan",
+      "ci.rerun_failed_workflow",
+    ]);
+    expect(tools.tools.every((tool) => tool.name.startsWith("ci."))).toBe(true);
+    await client.close();
+    await new Promise<void>((resolve, reject) => ciServer.close((error) => (error ? reject(error) : resolve())));
+  });
+
   it("keeps health metadata public to the private network but protects MCP", async () => {
     const health = await fetch(new URL("/healthz", baseUrl));
     const unauthorized = await fetch(new URL("/mcp", baseUrl), {
@@ -66,6 +106,19 @@ describe("private Streamable HTTP transport", () => {
     expect(unauthorized.status).toBe(401);
     expect(unauthorized.headers.get("www-authenticate")).toBe("Bearer");
     expect(await unauthorized.text()).not.toContain(TEST_CREDENTIAL);
+  });
+
+  it("fails closed for /mcp/ci when CI is disabled", async () => {
+    const response = await fetch(new URL("/mcp/ci", baseUrl), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TEST_CREDENTIAL}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+
+    expect(response.status).toBe(404);
   });
 
   it("rejects untrusted Host headers before MCP handling", async () => {

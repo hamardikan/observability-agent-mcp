@@ -49,7 +49,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#apiBaseUrl = trustedGitHubApiBase(options.apiBaseUrl);
-    this.#actionsPermission = options.actionsPermission ?? "write";
+    this.#actionsPermission = options.actionsPermission ?? "read";
   }
 
   static fromPemFile(options: Omit<GitHubAppTokenProviderOptions, "privateKeyPem"> & { pemKeyFile: string }): GitHubAppTokenProvider {

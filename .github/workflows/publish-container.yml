@@ -41,6 +41,6 @@ jobs:
           push: true
           provenance: true
           sbom: true
-          tags: ghcr.io/hamardikan/observability-agent-mcp:sha-${{ github.sha }}
+          tags: ghcr.io/hmrdkn-labs/pak-satpam:sha-${{ github.sha }}
       - name: Record immutable image reference
-        run: echo "image=ghcr.io/hamardikan/observability-agent-mcp@${{ steps.build.outputs.digest }}"
+        run: echo "image=ghcr.io/hmrdkn-labs/pak-satpam@${{ steps.build.outputs.digest }}"
