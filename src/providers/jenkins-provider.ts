@@ -18,6 +18,15 @@ import {
   type CIWorkflowRun,
 } from "../domain/ci-schemas.js";
 import { CIProviderNativeIdSchema } from "../domain/ci-schemas.js";
+import {
+  assertCIProviderTransport,
+  ciProviderEndpointFromUrl,
+  normalizeCIProviderEndpoint,
+  resolveCIProviderUrl,
+  type CIProviderEndpoint,
+  type CIProviderName,
+  CIProviderNameSchema,
+} from "../domain/ci-provider-contracts.js";
 import { redactText } from "../ci/redaction.js";
 import { CIProviderError, type CIProvider } from "./ci-provider.js";
 
@@ -28,7 +37,10 @@ const JENKINS_PROVIDER_NAME = "jenkins" as const;
 type JsonRecord = Record<string, unknown>;
 
 export interface JenkinsProviderOptions {
-  readonly baseUrl: string;
+  /** Origin or reverse-proxy base URL. Use endpoint for structured configuration. */
+  readonly baseUrl?: string;
+  /** Origin plus base path, kept separate to prevent complete URL/path ambiguity. */
+  readonly endpoint?: CIProviderEndpoint;
   /** Branch in a multibranch job; challenge deployments use main. */
   readonly branch?: string;
   /** Jenkins API token authentication; anonymous read access remains supported. */
@@ -38,12 +50,14 @@ export interface JenkinsProviderOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly maxFreshnessMs?: number;
-  readonly providerName?: string;
+  readonly providerName?: CIProviderName;
+  readonly allowInsecureHttp?: boolean;
 }
 
 /** Read-only Jenkins adapter. The rerun port is deliberately disabled. */
 export class JenkinsProvider implements CIProvider {
-  readonly #baseUrl: URL;
+  readonly ciProviderType = "jenkins" as const;
+  readonly #endpoint: CIProviderEndpoint;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
   readonly #maxFreshnessMs: number;
@@ -51,13 +65,18 @@ export class JenkinsProvider implements CIProvider {
   readonly #authorization: string | undefined;
   readonly #providerName: string;
   constructor(options: JenkinsProviderOptions) {
-    this.#baseUrl = trustedBaseUrl(options.baseUrl);
+    this.#endpoint = configuredEndpoint(options.baseUrl, options.endpoint, "Jenkins");
+    assertCIProviderTransport(this.#endpoint, {
+      providerLabel: "Jenkins",
+      credentialed: options.username !== undefined || options.token !== undefined || options.tokenFile !== undefined,
+      ...(options.allowInsecureHttp === undefined ? {} : { allowInsecureHttp: options.allowInsecureHttp }),
+    });
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#maxFreshnessMs = options.maxFreshnessMs ?? 5 * 60_000;
     this.#branch = options.branch === undefined ? "main" : options.branch;
     this.#authorization = basicAuthorization(options);
-    this.#providerName = options.providerName ?? JENKINS_PROVIDER_NAME;
+    this.#providerName = CIProviderNameSchema.parse(options.providerName ?? JENKINS_PROVIDER_NAME);
   }
 
   async getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult> {
@@ -127,7 +146,7 @@ export class JenkinsProvider implements CIProvider {
 
   private async request(path: string): Promise<Response> {
     try {
-      return await this.#fetch(resolveProviderUrl(this.#baseUrl, path), {
+      return await this.#fetch(resolveCIProviderUrl(this.#endpoint, path), {
         method: "GET",
         headers: {
           accept: "application/json, text/plain",
@@ -142,17 +161,9 @@ export class JenkinsProvider implements CIProvider {
   }
 }
 
-function trustedBaseUrl(value: string): URL {
-  const url = new URL(value);
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) throw new Error("Jenkins base URL must be HTTP(S) without credentials");
-  if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
-  return url;
-}
-
-function resolveProviderUrl(baseUrl: URL, path: string): URL {
-  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
-  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
-  return url;
+function configuredEndpoint(baseUrl: string | undefined, endpoint: CIProviderEndpoint | undefined, label: string): CIProviderEndpoint {
+  if ((baseUrl === undefined) === (endpoint === undefined)) throw new Error(`${label} requires exactly one baseUrl or endpoint`);
+  return endpoint === undefined ? ciProviderEndpointFromUrl(baseUrl as string) : normalizeCIProviderEndpoint(endpoint);
 }
 
 function basicAuthorization(options: JenkinsProviderOptions): string | undefined {

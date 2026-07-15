@@ -64,6 +64,26 @@ describe("Jenkins read-only CI adapter", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("uses a structured reverse-proxy endpoint without duplicating its prefix", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({
+      number: 7,
+      result: "SUCCESS",
+      building: false,
+      timestamp: NOW.getTime(),
+      duration: 0,
+    })));
+    const adapter = new JenkinsProvider({
+      endpoint: { origin: "https://jenkins.local", path: "/reverse-proxy" },
+      fetch,
+      clock: () => NOW,
+    });
+
+    await adapter.getWorkflowStatus({ repo: "owner/repo", workflow: "folder/backend", runId: "7" });
+
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://jenkins.local/reverse-proxy/job/folder/job/backend/job/main/7/api/json");
+    expect(String(fetch.mock.calls[0]?.[0])).not.toContain("reverse-proxy/reverse-proxy");
+  });
+
   it("accepts a provider-native string build identifier", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({
       number: "build-main-7",
@@ -85,6 +105,24 @@ describe("Jenkins read-only CI adapter", () => {
     "https://jenkins.local/?target=https://attacker.invalid",
   ])("rejects unsafe Jenkins base URLs: %s", (baseUrl) => {
     expect(() => new JenkinsProvider({ baseUrl, fetch: vi.fn<typeof globalThis.fetch>() })).toThrow();
+  });
+
+  it("rejects Jenkins credentials over cleartext HTTP and only allows explicit loopback anonymous HTTP", () => {
+    expect(() => new JenkinsProvider({
+      baseUrl: "http://127.0.0.1:8080",
+      username: "ci-reader",
+      token: "jenkins-api-token-only-in-header",
+      fetch: vi.fn<typeof globalThis.fetch>(),
+    })).toThrow("HTTPS");
+    expect(() => new JenkinsProvider({
+      baseUrl: "http://127.0.0.1:8080",
+      fetch: vi.fn<typeof globalThis.fetch>(),
+    })).toThrow("explicit loopback");
+    expect(() => new JenkinsProvider({
+      baseUrl: "http://127.0.0.1:8080",
+      allowInsecureHttp: true,
+      fetch: vi.fn<typeof globalThis.fetch>(),
+    })).not.toThrow();
   });
 });
 
@@ -123,6 +161,20 @@ describe("Bitbucket read-only CI adapter", () => {
       "https://bitbucket.example/2.0/repositories/academytools/planpal-config-6/commit/" + "a".repeat(40) + "/statuses",
       "https://bitbucket.example/2.0/repositories/academytools/planpal-config-6/pullrequests/12",
     ]);
+  });
+
+  it("uses a structured full API base path exactly once", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({ values: [] })));
+    const adapter = new BitbucketProvider({
+      endpoint: { origin: "https://bitbucket.example", path: "/reverse-proxy/2.0" },
+      token: "reader:token-value",
+      fetch,
+    });
+
+    await adapter.getCommitStatus("academytools/planpal-config-6", "a".repeat(40));
+
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://bitbucket.example/reverse-proxy/2.0/repositories/academytools/planpal-config-6/commit/" + "a".repeat(40) + "/statuses");
+    expect(String(fetch.mock.calls[0]?.[0])).not.toContain("2.0/reverse-proxy");
   });
 
   it("normalizes Cloud in-progress and terminal result states without inventing a completed result", async () => {
@@ -170,6 +222,14 @@ describe("Bitbucket read-only CI adapter", () => {
     "ftp://bitbucket.example/2.0",
   ])("rejects unsafe Bitbucket Cloud base URLs: %s", (baseUrl) => {
     expect(() => new BitbucketProvider({ baseUrl, token: "reader:token-value", fetch: vi.fn<typeof globalThis.fetch>() })).toThrow();
+  });
+
+  it("rejects Bitbucket credentials over cleartext HTTP", () => {
+    expect(() => new BitbucketProvider({
+      baseUrl: "http://127.0.0.1:7990/2.0",
+      token: "reader:token-value",
+      fetch: vi.fn<typeof globalThis.fetch>(),
+    })).toThrow("HTTPS");
   });
 
 });

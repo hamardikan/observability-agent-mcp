@@ -30,6 +30,25 @@ describe("runtime CI capabilities", () => {
     expect(mismatched).toEqual([]);
   });
 
+  it("fails closed before MCP registration when a read provider is missing a required port", async () => {
+    const malformed = {
+      ciProviderType: "jenkins",
+      getWorkflowStatus: async () => { throw new Error("unreachable"); },
+      getFailedJobAnalysis: async () => { throw new Error("unreachable"); },
+      getLogEvidence: async () => { throw new Error("unreachable"); },
+    } as unknown as CIService["provider"];
+
+    expect(await listTools({
+      provider: malformed,
+      runtimeMetadata: {
+        name: "jenkins-prod",
+        type: "jenkins",
+        capabilities: { read: true, rerun: false },
+        approvalRequired: false,
+      },
+    })).toEqual([]);
+  });
+
   it("registers four read tools for a named read-only Jenkins provider without approval", async () => {
     const tools = await listTools({
       provider: jenkinsProvider(),

@@ -111,6 +111,31 @@ describe("GitHub Actions adapter", () => {
     );
   });
 
+  it("preserves a structured API reverse-proxy prefix without duplicating it", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({
+      id: 101,
+      status: "completed",
+      conclusion: "success",
+      run_attempt: 1,
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: "a".repeat(40),
+      created_at: "2026-07-10T00:00:00Z",
+      updated_at: "2026-07-10T00:00:00Z",
+    })));
+    const adapter = new GitHubActionsProvider({
+      token: "github-token-used-only-in-header",
+      endpoint: { origin: "https://api.github.com", path: "/reverse-proxy/api/v3" },
+      fetch,
+      clock: () => NOW,
+    });
+
+    await adapter.getWorkflowStatus({ repo: "owner/repo", workflow: "ci.yml", runId: "101" });
+
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://api.github.com/reverse-proxy/api/v3/repos/owner/repo/actions/runs/101");
+    expect(String(fetch.mock.calls[0]?.[0])).not.toContain("api/v3/reverse-proxy");
+  });
+
   it("preserves provider-native string and UUID run and job IDs", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({

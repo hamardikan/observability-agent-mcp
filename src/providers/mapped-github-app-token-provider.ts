@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 
 import type { CITokenProvider } from "./ci-provider.js";
 import { GitHubAppTokenProvider } from "./github-app-token-provider.js";
+import type { CIProviderEndpoint } from "../domain/ci-provider-contracts.js";
 
 export interface GitHubInstallationSelector {
   readonly repo?: string;
@@ -22,7 +23,8 @@ export class MappedGitHubAppTokenProvider implements CITokenProvider {
     repositories: readonly string[];
     fetch: typeof globalThis.fetch;
     clock: () => Date;
-    apiBaseUrl: string;
+    apiBaseUrl?: string;
+    apiEndpoint?: CIProviderEndpoint;
     actionsPermission?: "read" | "write";
   }): MappedGitHubAppTokenProvider {
     const appId = readNumericPrivateFile(options.appIdFile, "GitHub App ID");
@@ -47,7 +49,7 @@ export class MappedGitHubAppTokenProvider implements CITokenProvider {
         allowedRepositories,
         fetch: options.fetch,
         clock: options.clock,
-        apiBaseUrl: options.apiBaseUrl,
+        ...(options.apiEndpoint === undefined ? { apiBaseUrl: options.apiBaseUrl ?? "https://api.github.com" } : { apiEndpoint: options.apiEndpoint }),
         ...(options.actionsPermission === undefined ? {} : { actionsPermission: options.actionsPermission }),
       });
       if (selector.repo !== undefined) {

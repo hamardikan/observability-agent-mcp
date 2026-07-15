@@ -18,6 +18,15 @@ import {
   type CIWorkflowRun,
 } from "../domain/ci-schemas.js";
 import { CIProviderNativeIdSchema } from "../domain/ci-schemas.js";
+import {
+  assertCIProviderTransport,
+  ciProviderEndpointFromUrl,
+  normalizeCIProviderEndpoint,
+  resolveCIProviderUrl,
+  type CIProviderEndpoint,
+  type CIProviderName,
+  CIProviderNameSchema,
+} from "../domain/ci-provider-contracts.js";
 import { redactText } from "../ci/redaction.js";
 import { CIProviderError, type CIProvider } from "./ci-provider.js";
 
@@ -42,7 +51,10 @@ export interface BitbucketPullRequestStatus {
 }
 
 export interface BitbucketProviderOptions {
-  readonly baseUrl: string;
+  /** Origin or reverse-proxy base URL. Use endpoint for structured configuration. */
+  readonly baseUrl?: string;
+  /** Origin plus base path, kept separate to prevent complete URL/path ambiguity. */
+  readonly endpoint?: CIProviderEndpoint;
   /** A 0600 file containing username:token, or a token when username is set. */
   readonly tokenFile?: string;
   readonly username?: string;
@@ -50,12 +62,13 @@ export interface BitbucketProviderOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly maxFreshnessMs?: number;
-  readonly providerName?: string;
+  readonly providerName?: CIProviderName;
 }
 
 /** Read-only Bitbucket Cloud adapter. Bitbucket Data Center is not supported. */
 export class BitbucketProvider implements CIProvider {
-  readonly #baseUrl: URL;
+  readonly ciProviderType = "bitbucket" as const;
+  readonly #endpoint: CIProviderEndpoint;
   readonly #authorization: string;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
@@ -63,12 +76,13 @@ export class BitbucketProvider implements CIProvider {
   readonly #providerName: string;
 
   constructor(options: BitbucketProviderOptions) {
-    this.#baseUrl = trustedBaseUrl(options.baseUrl);
+    this.#endpoint = configuredEndpoint(options.baseUrl, options.endpoint, "Bitbucket");
     this.#authorization = basicAuthorization(options);
+    assertCIProviderTransport(this.#endpoint, { providerLabel: "Bitbucket", credentialed: true });
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#maxFreshnessMs = options.maxFreshnessMs ?? 5 * 60_000;
-    this.#providerName = options.providerName ?? BITBUCKET_PROVIDER_NAME;
+    this.#providerName = CIProviderNameSchema.parse(options.providerName ?? BITBUCKET_PROVIDER_NAME);
   }
 
   async getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult> {
@@ -198,7 +212,7 @@ export class BitbucketProvider implements CIProvider {
 
   private async request(path: string): Promise<Response> {
     try {
-      return await this.#fetch(resolveProviderUrl(this.#baseUrl, path), {
+      return await this.#fetch(resolveCIProviderUrl(this.#endpoint, path), {
         method: "GET",
         headers: { accept: "application/json, text/plain", authorization: this.#authorization },
         redirect: "error",
@@ -210,17 +224,9 @@ export class BitbucketProvider implements CIProvider {
   }
 }
 
-function trustedBaseUrl(value: string): URL {
-  const url = new URL(value);
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) throw new Error("Bitbucket base URL must be HTTP(S) without credentials");
-  if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
-  return url;
-}
-
-function resolveProviderUrl(baseUrl: URL, path: string): URL {
-  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
-  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
-  return url;
+function configuredEndpoint(baseUrl: string | undefined, endpoint: CIProviderEndpoint | undefined, label: string): CIProviderEndpoint {
+  if ((baseUrl === undefined) === (endpoint === undefined)) throw new Error(`${label} requires exactly one baseUrl or endpoint`);
+  return endpoint === undefined ? ciProviderEndpointFromUrl(baseUrl as string) : normalizeCIProviderEndpoint(endpoint);
 }
 
 function basicAuthorization(options: BitbucketProviderOptions): string {

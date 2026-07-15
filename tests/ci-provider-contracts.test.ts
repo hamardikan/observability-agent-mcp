@@ -19,8 +19,11 @@ const readProvider = (): CIReadProvider => ({
 });
 
 describe("provider-neutral CI contracts", () => {
-  it("keeps providerClass opaque instead of imposing a provider enum", () => {
+  it("uses one canonical provider-name schema for wire and registry identities", () => {
     expect(CIProviderClassSchema.safeParse("teamcity-primary").success).toBe(true);
+    expect(CIProviderClassSchema.safeParse("TeamCity-primary").success).toBe(false);
+    expect(CIProviderClassSchema.safeParse("teamcity_primary").success).toBe(false);
+    expect(CIProviderClassSchema.safeParse("teamcity.primary").success).toBe(false);
   });
 
   it("validates provider-specific capability declarations", () => {
@@ -47,6 +50,14 @@ describe("provider-neutral CI contracts", () => {
         token_file: "/run/secrets/bitbucket-token",
       }).success,
     ).toBe(true);
+    expect(
+      CIProviderConfigSchema.safeParse({
+        kind: "bitbucket",
+        endpoint: { origin: "http://127.0.0.1:7990", path: "/2.0" },
+        capabilities: READ_ONLY_CI_PROVIDER_CAPABILITIES,
+        token_file: "/run/secrets/bitbucket-token",
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts multiple named providers with independent configs", () => {
@@ -102,6 +113,19 @@ describe("provider-neutral CI contracts", () => {
         provider: readProvider(),
       }]),
     ).toThrow("declares rerun without a rerun port");
+
+    expect(
+      () => new CIProviderRegistry([{
+        name: "malformed-read",
+        kind: "jenkins",
+        capabilities: READ_ONLY_CI_PROVIDER_CAPABILITIES,
+        provider: {
+          getWorkflowStatus: vi.fn(),
+          getFailedJobAnalysis: vi.fn(),
+          getLogEvidence: vi.fn(),
+        } as unknown as CIReadProvider,
+      }]),
+    ).toThrow("declares read without port getRemediationPlan");
   });
 
   it("routes declared read and approval-gated rerun ports", async () => {

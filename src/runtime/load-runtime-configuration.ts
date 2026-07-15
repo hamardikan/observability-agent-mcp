@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 import { LogicalIdSchema } from "../domain/tool-schemas.js";
+import { CIProviderEndpointSchema, CIProviderNameSchema } from "../domain/ci-provider-contracts.js";
 import type { VisualAllowlist } from "../domain/visual-policy.js";
 import { GrafanaVisualProvider } from "../providers/grafana-visual-provider.js";
 import type {
@@ -93,16 +94,52 @@ const GitHubAppSchema = z
     }
   });
 const CIProviderTypeSchema = z.enum(["github", "jenkins", "bitbucket"]);
-const JenkinsConfigSchema = z.object({ base_url: z.url() }).strict();
+const CIProviderBaseUrlSchema = z.string().min(1).max(2_048).url().refine((value) => {
+  const url = new URL(value);
+  return (url.protocol === "http:" || url.protocol === "https:") && url.username === "" && url.password === "" && url.search === "" && url.hash === "";
+}, "must be an HTTP(S) base URL without credentials, query, or fragment");
+const JenkinsConfigSchema = z
+  .object({ base_url: CIProviderBaseUrlSchema.optional(), endpoint: CIProviderEndpointSchema.optional(), allow_insecure_http: z.boolean().default(false) })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.base_url === undefined) === (value.endpoint === undefined)) {
+      context.addIssue({ code: "custom", path: ["endpoint"], message: "configure exactly one base_url or endpoint" });
+      return;
+    }
+    const url = new URL(value.endpoint?.origin ?? value.base_url as string);
+    if (url.protocol === "http:" && (value.allow_insecure_http !== true || !["127.0.0.1", "::1"].includes(url.hostname.toLowerCase().replace(/^\[|\]$/g, "")))) {
+      context.addIssue({ code: "custom", path: ["base_url"], message: "cleartext HTTP requires explicit loopback opt-in" });
+    }
+  });
 const BitbucketConfigSchema = z
-  .object({ base_url: z.url(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
-  .strict();
+  .object({ base_url: CIProviderBaseUrlSchema.optional(), endpoint: CIProviderEndpointSchema.optional(), token_file: z.string().min(1).max(1_024), username: z.string().min(1).max(256).optional() })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.base_url === undefined) === (value.endpoint === undefined)) {
+      context.addIssue({ code: "custom", path: ["endpoint"], message: "configure exactly one base_url or endpoint" });
+      return;
+    }
+    if (new URL(value.endpoint?.origin ?? value.base_url as string).protocol !== "https:") context.addIssue({ code: "custom", path: ["base_url"], message: "Bitbucket credentials require HTTPS" });
+  });
 const GitHubConfigSchema = z
   .object({
-    api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
+    api_base_url: CIProviderBaseUrlSchema.optional(),
+    api_endpoint: CIProviderEndpointSchema.optional(),
     app: GitHubAppSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.api_base_url !== undefined && value.api_endpoint !== undefined) {
+      context.addIssue({ code: "custom", path: ["api_endpoint"], message: "configure exactly one api_base_url or api_endpoint" });
+    }
+    const origin = value.api_endpoint?.origin ?? value.api_base_url;
+    if (origin !== undefined) {
+      const url = new URL(origin);
+      if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "") {
+        context.addIssue({ code: "custom", path: ["api_base_url"], message: "GitHub API base URL is not trusted" });
+      }
+    }
+  });
 const NamedCIProviderSchema = z
   .object({
     type: CIProviderTypeSchema,
@@ -119,8 +156,8 @@ const CIConfigSchema = z
   .object({
     enabled: z.boolean().default(false),
     provider: CIProviderTypeSchema.default("github"),
-    provider_name: LogicalIdSchema.optional(),
-    providers: z.record(LogicalIdSchema, NamedCIProviderSchema).refine((providers) => Object.keys(providers).length <= 20).optional(),
+    provider_name: CIProviderNameSchema.optional(),
+    providers: z.record(CIProviderNameSchema, NamedCIProviderSchema).refine((providers) => Object.keys(providers).length <= 20).optional(),
     allowlist: z.array(CIAllowlistEntrySchema).max(100).default([]),
     github: GitHubConfigSchema.optional(),
     jenkins: JenkinsConfigSchema.optional(),
@@ -423,7 +460,10 @@ function buildCIConfiguration(
     ? selected.configuration.jenkins === undefined
       ? (() => { throw new Error("Invalid CI runtime configuration"); })()
       : new JenkinsProvider({
-          baseUrl: selected.configuration.jenkins.base_url,
+          ...(selected.configuration.jenkins.endpoint === undefined
+            ? { baseUrl: selected.configuration.jenkins.base_url! }
+            : { endpoint: selected.configuration.jenkins.endpoint }),
+          allowInsecureHttp: selected.configuration.jenkins.allow_insecure_http,
           fetch: options.fetch,
           providerName: selected.metadata.name,
           ...(options.clock === undefined ? {} : { clock }),
@@ -433,7 +473,9 @@ function buildCIConfiguration(
       ? selected.configuration.bitbucket === undefined
         ? (() => { throw new Error("Invalid CI runtime configuration"); })()
         : new BitbucketProvider({
-            baseUrl: selected.configuration.bitbucket.base_url,
+            ...(selected.configuration.bitbucket.endpoint === undefined
+              ? { baseUrl: selected.configuration.bitbucket.base_url! }
+              : { endpoint: selected.configuration.bitbucket.endpoint }),
             tokenFile: selected.configuration.bitbucket.token_file,
             ...(selected.configuration.bitbucket.username === undefined ? {} : { username: selected.configuration.bitbucket.username }),
             fetch: options.fetch,
@@ -492,7 +534,9 @@ function buildGitHubProvider(
           repositories,
           fetch: options.fetch,
           clock,
-          apiBaseUrl: configuration.github.api_base_url,
+          ...(configuration.github.api_endpoint === undefined
+            ? { apiBaseUrl: configuration.github.api_base_url ?? "https://api.github.com" }
+            : { apiEndpoint: configuration.github.api_endpoint }),
           actionsPermission: "read",
         })
       : GitHubAppTokenProvider.fromPemFile({
@@ -502,7 +546,9 @@ function buildGitHubProvider(
           allowedRepositories: repositories,
           fetch: options.fetch,
           clock,
-          apiBaseUrl: configuration.github.api_base_url,
+          ...(configuration.github.api_endpoint === undefined
+            ? { apiBaseUrl: configuration.github.api_base_url ?? "https://api.github.com" }
+            : { apiEndpoint: configuration.github.api_endpoint }),
           actionsPermission: "read",
         });
   const writeTokenProvider = app === undefined
@@ -517,7 +563,9 @@ function buildGitHubProvider(
           repositories,
           fetch: options.fetch,
           clock,
-          apiBaseUrl: configuration.github.api_base_url,
+          ...(configuration.github.api_endpoint === undefined
+            ? { apiBaseUrl: configuration.github.api_base_url ?? "https://api.github.com" }
+            : { apiEndpoint: configuration.github.api_endpoint }),
           actionsPermission: "write",
         })
       : GitHubAppTokenProvider.fromPemFile({
@@ -527,7 +575,9 @@ function buildGitHubProvider(
           allowedRepositories: repositories,
           fetch: options.fetch,
           clock,
-          apiBaseUrl: configuration.github.api_base_url,
+          ...(configuration.github.api_endpoint === undefined
+            ? { apiBaseUrl: configuration.github.api_base_url ?? "https://api.github.com" }
+            : { apiEndpoint: configuration.github.api_endpoint }),
           actionsPermission: "write",
         });
   if (readTokenProvider === undefined || writeTokenProvider === undefined) throw new Error("CI runtime configuration requires a GitHub App or token file");
@@ -536,7 +586,9 @@ function buildGitHubProvider(
     writeTokenProvider,
     fetch: options.fetch,
     ...(options.clock === undefined ? {} : { clock }),
-    apiBaseUrl: configuration.github.api_base_url,
+    ...(configuration.github.api_endpoint === undefined
+      ? { apiBaseUrl: configuration.github.api_base_url ?? "https://api.github.com" }
+      : { endpoint: configuration.github.api_endpoint }),
     maxFreshnessMs: maxFreshnessSeconds * 1_000,
     providerName: configuration.name,
   });

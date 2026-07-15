@@ -57,6 +57,8 @@ import {
   type CIWorkflowStatusInput,
 } from "../domain/ci-schemas.js";
 import { CIProviderError } from "../providers/ci-provider.js";
+import { hasCIReadPorts } from "../providers/ci-provider-registry.js";
+import { CIProviderNameSchema } from "../domain/ci-provider-contracts.js";
 import { assertCIResourceAllowed } from "../ci/policy.js";
 import type { CIProviderRuntimeMetadata, CIService } from "../ci/service.js";
 import { VERSION } from "../version.js";
@@ -283,26 +285,19 @@ function registerCITools(server: McpServer, ci: CIService, clock: Clock): void {
 function validRuntimeMetadata(ci: CIService): CIProviderRuntimeMetadata | undefined {
   const metadata = ci.runtimeMetadata;
   if (metadata === undefined || metadata.name.trim().length === 0) return undefined;
+  if (!CIProviderNameSchema.safeParse(metadata.name).success) return undefined;
+  if (metadata.capabilities.read && !hasCIReadPorts(ci.provider)) return undefined;
   if (ci.providerRegistry !== undefined) {
     const registration = ci.providerRegistry.get(metadata.name);
     if (registration === undefined || registration.provider !== ci.provider || registration.kind !== metadata.type) return undefined;
     if (registration.capabilities.read !== metadata.capabilities.read || (registration.capabilities.rerun === "approval-gated") !== metadata.capabilities.rerun) return undefined;
   } else {
-    const providerType = providerTypeForImplementation(ci.provider);
+    const providerType = ci.provider.ciProviderType;
     if (providerType === undefined || providerType !== metadata.type) return undefined;
   }
   if (metadata.capabilities.read !== true && metadata.capabilities.rerun !== true) return undefined;
   if (metadata.approvalRequired !== (metadata.type === "github" && metadata.capabilities.rerun)) return undefined;
   return metadata;
-}
-
-function providerTypeForImplementation(provider: CIService["provider"]): CIProviderRuntimeMetadata["type"] | undefined {
-  switch (provider.constructor.name) {
-    case "GitHubActionsProvider": return "github";
-    case "JenkinsProvider": return "jenkins";
-    case "BitbucketProvider": return "bitbucket";
-    default: return undefined;
-  }
 }
 
 async function ciRead<TInput extends CIWorkflowStatusInput | CIFailedJobAnalysisInput | CILogEvidenceInput | CIRemediationPlanInput>(

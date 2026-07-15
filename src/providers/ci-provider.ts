@@ -34,8 +34,14 @@ export interface CIRerunProvider {
   rerunFailedWorkflow(input: Omit<CIRerunFailedWorkflowInput, "requestId" | "approvalToken">): Promise<CIRerunFailedWorkflowResult>;
 }
 
+export type CIProviderRuntimeType = "github" | "jenkins" | "bitbucket";
+
+export interface CIProviderIdentity {
+  readonly ciProviderType?: CIProviderRuntimeType;
+}
+
 /** Compatibility shape for existing adapters that expose both ports. */
-export interface CIProvider extends CIReadProvider, CIRerunProvider {}
+export interface CIProvider extends CIReadProvider, CIRerunProvider, CIProviderIdentity {}
 
 export class CIUnsupportedCapabilityError extends CIProviderError {
   readonly providerName: CIProviderName;

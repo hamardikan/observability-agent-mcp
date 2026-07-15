@@ -17,6 +17,14 @@ import {
   type CIWorkflowStatusResult,
 } from "../domain/ci-schemas.js";
 import { CIProviderNativeIdSchema } from "../domain/ci-schemas.js";
+import {
+  ciProviderEndpointFromUrl,
+  normalizeCIProviderEndpoint,
+  resolveCIProviderUrl,
+  type CIProviderEndpoint,
+  type CIProviderName,
+  CIProviderNameSchema,
+} from "../domain/ci-provider-contracts.js";
 import { CIProviderError, type CIProvider, type CITokenProvider, type CIWorkflowRunListInput, type CIWorkflowRunListResult } from "./ci-provider.js";
 import { StaticGitHubTokenProvider } from "./github-app-token-provider.js";
 import { redactText } from "../ci/redaction.js";
@@ -31,17 +39,20 @@ export interface GitHubActionsProviderOptions {
   readonly writeTokenProvider?: CITokenProvider;
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
+  /** GitHub API origin/base URL. Use endpoint for structured reverse-proxy configuration. */
   readonly apiBaseUrl?: string;
+  readonly endpoint?: CIProviderEndpoint;
   readonly maxFreshnessMs?: number;
-  readonly providerName?: string;
+  readonly providerName?: CIProviderName;
 }
 
 export class GitHubActionsProvider implements CIProvider {
+  readonly ciProviderType = "github" as const;
   readonly #tokenProvider: CITokenProvider;
   readonly #writeTokenProvider: CITokenProvider | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
-  readonly #apiBaseUrl: URL;
+  readonly #apiEndpoint: CIProviderEndpoint;
   readonly #maxFreshnessMs: number;
   readonly #providerName: string;
 
@@ -51,9 +62,9 @@ export class GitHubActionsProvider implements CIProvider {
     this.#writeTokenProvider = options.writeTokenProvider ?? (options.token === undefined ? undefined : this.#tokenProvider);
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
-    this.#apiBaseUrl = trustedGitHubApiBase(options.apiBaseUrl);
+    this.#apiEndpoint = trustedGitHubApiEndpoint(options.apiBaseUrl, options.endpoint);
     this.#maxFreshnessMs = options.maxFreshnessMs ?? 5 * 60_000;
-    this.#providerName = options.providerName ?? GITHUB_PROVIDER_NAME;
+    this.#providerName = CIProviderNameSchema.parse(options.providerName ?? GITHUB_PROVIDER_NAME);
   }
 
   async getWorkflowStatus(input: CIWorkflowStatusInput): Promise<CIWorkflowStatusResult> {
@@ -179,7 +190,7 @@ export class GitHubActionsProvider implements CIProvider {
       redirect,
       signal: AbortSignal.timeout(10_000),
     };
-    return this.#fetch(resolveProviderUrl(this.#apiBaseUrl, path).toString(), init).catch(() => { throw new CIProviderError("unavailable"); });
+    return this.#fetch(resolveCIProviderUrl(this.#apiEndpoint, path).toString(), init).catch(() => { throw new CIProviderError("unavailable"); });
   }
 }
 
@@ -190,18 +201,16 @@ function isGitHubActionsLogHost(hostname: string): boolean {
     || normalized === "results-receiver.actions.githubusercontent.com"
     || normalized.endsWith(".blob.core.windows.net");
 }
-function trustedGitHubApiBase(value: string | undefined): URL {
-  const url = new URL(value ?? "https://api.github.com");
-  if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "" || url.username !== "" || url.password !== "" || (url.pathname !== "/" && url.pathname !== "")) {
+function trustedGitHubApiEndpoint(baseUrl: string | undefined, endpoint: CIProviderEndpoint | undefined): CIProviderEndpoint {
+  if (baseUrl !== undefined && endpoint !== undefined) throw new Error("GitHub requires exactly one apiBaseUrl or endpoint");
+  const configured = endpoint === undefined
+    ? ciProviderEndpointFromUrl(baseUrl ?? "https://api.github.com")
+    : normalizeCIProviderEndpoint(endpoint);
+  const url = new URL(configured.origin);
+  if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "") {
     throw new Error("GitHub API base URL is not trusted");
   }
-  return url;
-}
-
-function resolveProviderUrl(baseUrl: URL, path: string): URL {
-  const url = new URL(path.replace(/^\/+/, ""), baseUrl);
-  if (url.origin !== baseUrl.origin) throw new CIProviderError("permission");
-  return url;
+  return configured;
 }
 
 function encode(value: string): string { return encodeURIComponent(value); }

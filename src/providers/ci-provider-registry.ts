@@ -14,6 +14,18 @@ import {
   type CIRerunProvider,
 } from "./ci-provider.js";
 
+const REQUIRED_READ_PORTS = [
+  "getWorkflowStatus",
+  "getFailedJobAnalysis",
+  "getLogEvidence",
+  "getRemediationPlan",
+] as const satisfies readonly (keyof CIReadProvider)[];
+
+export function hasCIReadPorts(provider: unknown): provider is CIReadProvider {
+  if (provider === null || typeof provider !== "object") return false;
+  return REQUIRED_READ_PORTS.every((port) => typeof (provider as Record<string, unknown>)[port] === "function");
+}
+
 export type CIProviderImplementation = CIReadProvider & Partial<CIRerunProvider>;
 
 export interface CIProviderRegistration {
@@ -38,6 +50,10 @@ export class CIProviderRegistry {
         ...(registration.endpoint === undefined ? {} : { endpoint: registration.endpoint }),
       });
       if (providers.has(descriptor.name)) throw new Error(`Duplicate CI provider name: ${descriptor.name}`);
+      if (descriptor.capabilities.read && !hasCIReadPorts(registration.provider)) {
+        const missing = REQUIRED_READ_PORTS.find((port) => typeof (registration.provider as unknown as Record<string, unknown>)[port] !== "function");
+        throw new Error(`CI provider ${descriptor.name} declares read without port ${missing ?? "unknown"}`);
+      }
       if (
         descriptor.capabilities.rerun === "approval-gated" &&
         typeof registration.provider.rerunFailedWorkflow !== "function"

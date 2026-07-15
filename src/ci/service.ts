@@ -2,11 +2,12 @@ import type { CIAllowlist } from "./policy.js";
 import type { ApprovalTokenService } from "./approval.js";
 import type { CIProvider } from "../providers/ci-provider.js";
 import type { CIProviderRegistry } from "../providers/ci-provider-registry.js";
+import type { CIProviderName } from "../domain/ci-provider-contracts.js";
 
 export type CIProviderType = "github" | "jenkins" | "bitbucket";
 
 export interface CIProviderRuntimeMetadata {
-  readonly name: string;
+  readonly name: CIProviderName;
   readonly type: CIProviderType;
   readonly capabilities: {
     readonly read: boolean;

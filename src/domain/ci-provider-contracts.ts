@@ -72,6 +72,34 @@ export const CIProviderEndpointSchema = z
   .strict();
 export type CIProviderEndpoint = z.infer<typeof CIProviderEndpointSchema>;
 
+/** Parse a configured URL as an origin plus an optional reverse-proxy prefix. */
+export function ciProviderEndpointFromUrl(value: string): CIProviderEndpoint {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("CI provider base URL must be a valid URL");
+  }
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
+    throw new Error("CI provider base URL must not contain credentials, query, or fragment");
+  }
+  return normalizeCIProviderEndpoint({ origin: url.origin, path: url.pathname || "/" });
+}
+
+/** Permit cleartext only for explicitly enabled, anonymous loopback development endpoints. */
+export function assertCIProviderTransport(
+  endpoint: CIProviderEndpoint,
+  options: { readonly providerLabel: string; readonly credentialed: boolean; readonly allowInsecureHttp?: boolean },
+): void {
+  const normalized = normalizeCIProviderEndpoint(endpoint);
+  const origin = new URL(normalized.origin);
+  if (origin.protocol !== "http:") return;
+  if (options.credentialed) throw new Error(`${options.providerLabel} credentials require HTTPS`);
+  if (options.allowInsecureHttp !== true || !isLoopbackHost(origin.hostname)) {
+    throw new Error(`${options.providerLabel} cleartext HTTP is only allowed for explicit loopback development`);
+  }
+}
+
 const GitHubProviderConfigSchema = z
   .object({
     kind: z.literal("github-actions"),
@@ -103,7 +131,12 @@ const BitbucketProviderConfigSchema = z
     token_file: z.string().min(1).max(1_024),
     username: z.string().min(1).max(256).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (new URL(value.endpoint.origin).protocol === "http:") {
+      context.addIssue({ code: "custom", path: ["endpoint", "origin"], message: "Bitbucket credentials require HTTPS" });
+    }
+  });
 
 /** Built-in config contracts validate capability declarations per adapter. */
 export const CIProviderConfigSchema = z.discriminatedUnion("kind", [
@@ -188,4 +221,9 @@ function joinPath(prefix: string, suffix: string): string {
 
 function isAbsoluteUrl(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "127.0.0.1" || normalized === "::1";
 }

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadRuntimeConfiguration } from "../src/runtime/load-runtime-configuration.js";
+import { loadRuntimeConfiguration, parseRuntimeConfiguration } from "../src/runtime/load-runtime-configuration.js";
 import { diagnoseRuntimeConfiguration } from "../src/diagnostics/config-diagnostics.js";
 
 const FIXED_NOW = new Date("2026-07-10T00:00:00.000Z");
@@ -145,6 +145,17 @@ describe("private runtime configuration", () => {
         fetch,
       }),
     ).toThrow("Secret file permissions are too broad");
+  });
+
+  it.each(["Jenkins-prod", "jenkins_prod", "jenkins.prod"])("rejects non-canonical CI provider names: %s", (providerName) => {
+    expect(() => parseRuntimeConfiguration(`${CI_ONLY_CONFIG.replace("APPROVAL_KEY_FILE", "/tmp/key").replace("provider: jenkins", `provider_name: ${providerName}\n  providers:\n    ${providerName}:\n      type: jenkins\n      jenkins:\n        base_url: https://jenkins.example\n  provider: jenkins`)}`)).toThrow("Invalid runtime configuration");
+  });
+
+  it("accepts one structured CI endpoint and rejects ambiguous base plus endpoint configuration", () => {
+    const structured = parseRuntimeConfiguration(CI_ONLY_CONFIG
+      .replace("base_url: https://jenkins.example", "endpoint:\n      origin: https://jenkins.example\n      path: /reverse-proxy"));
+    expect(structured.ci?.jenkins?.endpoint).toEqual({ origin: "https://jenkins.example", path: "/reverse-proxy" });
+    expect(() => parseRuntimeConfiguration(`${CI_ONLY_CONFIG.replace("base_url: https://jenkins.example", "base_url: https://jenkins.example\n    endpoint:\n      origin: https://jenkins.example\n      path: /reverse-proxy")}`)).toThrow("Invalid runtime configuration");
   });
 
   it("loads the optional CI module only from private credential files", () => {

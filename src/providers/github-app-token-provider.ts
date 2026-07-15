@@ -1,6 +1,7 @@
 import { createPrivateKey, createSign } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { CIProviderError, type CITokenProvider } from "./ci-provider.js";
+import { ciProviderEndpointFromUrl, normalizeCIProviderEndpoint, resolveCIProviderUrl, type CIProviderEndpoint } from "../domain/ci-provider-contracts.js";
 
 const GITHUB_API_VERSION = "2022-11-28";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
@@ -13,6 +14,7 @@ export interface GitHubAppTokenProviderOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: () => Date;
   readonly apiBaseUrl?: string;
+  readonly apiEndpoint?: CIProviderEndpoint;
   readonly actionsPermission?: "read" | "write";
 }
 
@@ -30,7 +32,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
   readonly #allowedRepositories: ReadonlySet<string>;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
-  readonly #apiBaseUrl: URL;
+  readonly #apiEndpoint: CIProviderEndpoint;
   readonly #actionsPermission: "read" | "write";
   readonly #cached = new Map<string, { token: string; expiresAt: number }>();
 
@@ -48,7 +50,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
     this.#allowedRepositories = new Set(options.allowedRepositories);
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
-    this.#apiBaseUrl = trustedGitHubApiBase(options.apiBaseUrl);
+    this.#apiEndpoint = trustedGitHubApiEndpoint(options.apiBaseUrl, options.apiEndpoint);
     this.#actionsPermission = options.actionsPermission ?? "read";
   }
 
@@ -66,7 +68,7 @@ export class GitHubAppTokenProvider implements CITokenProvider {
 
     const jwt = this.createJwt();
     const response = await this.#fetch(
-      new URL(`app/installations/${encodeURIComponent(this.#installationId)}/access_tokens`, this.#apiBaseUrl).toString(),
+      resolveCIProviderUrl(this.#apiEndpoint, `app/installations/${encodeURIComponent(this.#installationId)}/access_tokens`).toString(),
       {
         method: "POST",
         headers: {
@@ -106,12 +108,16 @@ export class GitHubAppTokenProvider implements CITokenProvider {
   }
 }
 
-function trustedGitHubApiBase(value: string | undefined): URL {
-  const url = new URL(value ?? "https://api.github.com");
-  if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "" || url.username !== "" || url.password !== "" || (url.pathname !== "/" && url.pathname !== "")) {
+function trustedGitHubApiEndpoint(baseUrl: string | undefined, endpoint: CIProviderEndpoint | undefined): CIProviderEndpoint {
+  if (baseUrl !== undefined && endpoint !== undefined) throw new Error("GitHub requires exactly one apiBaseUrl or apiEndpoint");
+  const configured = endpoint === undefined
+    ? ciProviderEndpointFromUrl(baseUrl ?? "https://api.github.com")
+    : normalizeCIProviderEndpoint(endpoint);
+  const url = new URL(configured.origin);
+  if (url.protocol !== "https:" || url.hostname !== "api.github.com" || url.port !== "") {
     throw new Error("GitHub API base URL is not trusted");
   }
-  return url;
+  return configured;
 }
 
 function isTokenResponse(value: unknown): value is { token: string; expires_at: string } {
