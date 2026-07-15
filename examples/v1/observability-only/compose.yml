@@ -1,0 +1,21 @@
+services:
+  pak-satpam:
+    build:
+      context: ../../..
+      dockerfile: Containerfile
+    image: observability-agent-mcp:example-v1-observability
+    platform: ${PLATFORM:-linux/amd64}
+    command: ["dist/http-cli.js"]
+    environment:
+      MCP_HTTP_HOST: "0.0.0.0"
+      MCP_HTTP_PORT: "8765"
+      MCP_HTTP_ALLOWED_HOSTS: "mcp.example.test,127.0.0.1"
+      OBSERVABILITY_PROVIDER_CONFIG: /run/runtime/provider-config.yml
+      GRAFANA_TOKEN_FILE: /run/runtime/grafana-token
+      MCP_TOKEN_FILE: /run/runtime/mcp-token
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./runtime-config.yml:/run/runtime/provider-config.yml:ro
+      - ./secrets/grafana-token:/run/runtime/grafana-token:ro
+      - ./secrets/mcp-token:/run/runtime/mcp-token:ro

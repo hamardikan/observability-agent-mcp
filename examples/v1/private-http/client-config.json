@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pak-satpam": {
+      "type": "streamable-http",
+      "url": "http://mcp.example.test:8765/mcp",
+      "headers": {
+        "Authorization": "Bearer OPERATOR_SUPPLIED_TOKEN"
+      }
+    }
+  }
+}

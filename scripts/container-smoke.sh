@@ -6,6 +6,14 @@ name="observability-agent-mcp-smoke-$$"
 volume="observability-agent-mcp-smoke-runtime-$$"
 temporary="$(mktemp -d)"
 
+docker_run() {
+  if [[ -n "${CONTAINER_PLATFORM:-}" ]]; then
+    docker run --platform "$CONTAINER_PLATFORM" "$@"
+  else
+    docker run "$@"
+  fi
+}
+
 cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker volume rm -f "$volume" >/dev/null 2>&1 || true
@@ -40,14 +48,14 @@ printf '%s\n' 'mcp-container-smoke-token-123' >"$temporary/mcp-token"
 chmod 600 "$temporary"/*
 
 docker volume create "$volume" >/dev/null
-docker run --rm --entrypoint test "$image" -f /app/dist/observer/cli.js
-docker run --rm --user 0:0 \
+docker_run --rm --entrypoint test "$image" -f /app/dist/observer/cli.js
+docker_run --rm --user 0:0 \
   --volume "$temporary:/source:ro" \
   --volume "$volume:/target" \
   --entrypoint sh \
   "$image" -c 'cp /source/provider-config.yml /source/grafana-token /source/mcp-token /target/ && chmod 600 /target/* && chown 1000:1000 /target/*'
 
-docker run -d --name "$name" \
+docker_run -d --name "$name" \
   --publish 127.0.0.1::8765 \
   --env MCP_HTTP_HOST=0.0.0.0 \
   --env MCP_HTTP_PORT=8765 \
@@ -72,5 +80,18 @@ for attempt in $(seq 1 30); do
 done
 
 test "$(docker inspect "$name" --format '{{.Config.User}}')" = "node"
+if [[ -n "${CONTAINER_PLATFORM:-}" ]]; then
+  expected_arch=""
+  case "$CONTAINER_PLATFORM" in
+    linux/amd64) expected_arch="x64" ;;
+    linux/arm64) expected_arch="arm64" ;;
+  esac
+  test -n "$expected_arch"
+  test "$(docker exec "$name" node -p 'process.arch')" = "$expected_arch"
+fi
+unauthorized_status="$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' "$endpoint")"
+test "$unauthorized_status" = "401"
+rejected_host_status="$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' -H 'Host: untrusted.example.test' "http://$binding/healthz")"
+test "$rejected_host_status" = "403"
 node scripts/http-smoke.mjs "$endpoint" "$temporary/mcp-token"
 echo "container_runtime_smoke=ok"

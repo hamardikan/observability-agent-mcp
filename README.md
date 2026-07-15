@@ -104,6 +104,8 @@ See the [CI observer deployment contract](docs/ci-observer.md).
 
 ## Run It
 
+### Install
+
 Pak Satpam requires Node.js 22 or newer.
 
 ```bash
@@ -127,6 +129,24 @@ Run the complete local verification suite with:
 ```bash
 npm run validate
 ```
+
+### Profiles
+
+Version 1 has five documented installation profiles under
+[`examples/v1`](examples/v1/README.md):
+
+| Profile | Transport | Tools exposed |
+| --- | --- | --- |
+| observability-only | private Streamable HTTP at `/mcp` | observability tools |
+| ci-only | private Streamable HTTP at `/mcp/ci` | CI tools only on that client surface |
+| combined | private Streamable HTTP at `/mcp` | observability and CI tools |
+| stdio | local process stdin/stdout | observability tools |
+| private-http | private Streamable HTTP at `/mcp` | observability tools |
+
+The CI-only profile still supplies the complete runtime configuration because
+the current HTTP entrypoint loads observability providers before registering
+the CI-only route. The examples use placeholders and do not contain private
+topology or credentials.
 
 ### Container
 
@@ -153,6 +173,24 @@ For a local build and stdio smoke run:
 npm run container:build
 docker run --rm -i observability-agent-mcp:local
 ```
+
+For the real architecture/runtime gate, install QEMU on the Buildx host when
+it is needed and run:
+
+```bash
+./scripts/container-runtime-smoke.sh
+```
+
+This builds and loads one image for each of `linux/amd64` and `linux/arm64`,
+starts it as the selected platform, checks the non-root identity and private
+HTTP denial boundary, and completes an MCP initialize, tool discovery, and
+read-only tool call. The gate is non-publishing. Use
+`CONTAINER_RUNTIME_PLATFORMS=linux/arm64` to run one platform locally.
+
+HTTP examples bind to `127.0.0.1` only. Publishing this repository or the OCI
+image does not make an HTTP endpoint safe to expose publicly. Do not change
+the binding or allowed-host policy without completing the OAuth,
+authorization, ingress, and tenant-isolation review in the security docs.
 
 ## Connect It to an Agent
 

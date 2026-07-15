@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "pak-satpam": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "-f",
+        "/absolute/path/to/pak-satpam/examples/v1/stdio/compose.yml",
+        "run",
+        "--rm",
+        "-T",
+        "pak-satpam"
+      ]
+    }
+  }
+}

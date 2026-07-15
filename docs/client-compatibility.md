@@ -64,3 +64,27 @@ one file-injected Bearer credential, exact allowed Host values, stateless SDK
 transport instances, and no public ingress. A 401 response contains only a
 generic `WWW-Authenticate: Bearer` challenge. It must not be exposed as the
 OAuth-complete public endpoint described above.
+
+## Versioned Installation Profiles
+
+The executable examples in [`examples/v1`](../examples/v1/README.md) keep the
+client contract explicit:
+
+| Profile | Client configuration | Endpoint |
+| --- | --- | --- |
+| observability-only | `examples/v1/observability-only/compose.yml` | `/mcp` |
+| ci-only | `examples/v1/ci-only/compose.yml` | `/mcp/ci` |
+| combined | `examples/v1/combined/compose.yml` | `/mcp` |
+| stdio | `examples/v1/stdio/client-config.json` | process stdin/stdout |
+| private-http | `examples/v1/private-http/client-config.json` | `/mcp` |
+
+HTTP profiles are intentionally loopback-bound and require operator-supplied
+secret files. The hostnames and repository names in the examples are reserved
+placeholders. A deployment must not infer public exposure, credential scope,
+or private topology from these files.
+
+The container release gate runs the same standard MCP client handshake against
+separately loaded `linux/amd64` and `linux/arm64` images. It verifies
+initialization, tool discovery, a read-only health call, non-root execution,
+missing-bearer rejection, and disallowed-host rejection before reporting the
+platform as compatible.

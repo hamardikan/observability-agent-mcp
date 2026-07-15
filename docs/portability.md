@@ -86,9 +86,30 @@ mount its policy, GitHub App identity, installation IDs, HMAC key, and writable
 metadata-only state path explicitly. The observer opens only its configured
 health/metrics listener and outbound GitHub/Hermes connections.
 
+## Versioned Examples
+
+The [`examples/v1`](../examples/v1/README.md) directory contains placeholder-
+only contracts for observability-only, CI-only, combined, stdio, and private
+HTTP profiles. The HTTP Compose examples build the local `Containerfile`, use
+reserved `example.test` names, mount operator-created `0600` secret files, and
+publish only to loopback. The CI-only client uses `/mcp/ci`; the combined
+client uses `/mcp`.
+
+The examples are starting points, not a deployment policy. Replace the
+provider URLs, repository/workflow allowlist, and file paths in a private copy.
+Do not add private hostnames, addresses, credentials, or topology to this
+public repository.
+
 ## Gates
 
-Validation runs the package/protocol gates and a non-publishing Buildx build
-for both target platforms. The publish workflow repeats the release contract
-check before publishing the existing GHCR image with provenance and an SBOM.
-Neither gate deploys a workload or reads runtime secret files.
+Validation runs the package/protocol gates, a non-publishing multi-platform
+Buildx build, and a per-platform `--load` runtime smoke for both target
+platforms. The runtime smoke starts the image as `node`, rejects an
+unauthenticated or disallowed-host request, and completes a real MCP HTTP
+handshake and read-only call. QEMU is used for emulated execution where the
+host architecture requires it. The publish workflow repeats the release
+contract check before publishing the existing GHCR image with provenance and
+an SBOM. Neither gate deploys a workload or reads runtime secret files.
+
+Private HTTP remains a private, single-operator mode. The examples bind to
+loopback and the public release contract does not authorize public exposure.

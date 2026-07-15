@@ -1,0 +1,10 @@
+services:
+  pak-satpam:
+    build:
+      context: ../../..
+      dockerfile: Containerfile
+    image: observability-agent-mcp:example-v1-stdio
+    platform: ${PLATFORM:-linux/amd64}
+    command: ["dist/cli.js"]
+    stdin_open: true
+    tty: false

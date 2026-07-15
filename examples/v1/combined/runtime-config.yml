@@ -1,0 +1,46 @@
+version: 1
+providers:
+  metrics:
+    type: prometheus-compatible
+    base_url: https://metrics.example.test
+  alerts:
+    type: vmalert
+    base_url: https://alerts.example.test
+  grafana:
+    type: grafana
+    base_url: https://grafana.example.test
+policy:
+  named_queries:
+    service-up:
+      expression: up
+      label_keys: [job, instance]
+  service_health:
+    api:
+      query_template: service-up
+      healthy_when: { operator: gte, value: 1 }
+      summary: Example API health
+  dashboards:
+    overview:
+      uid: example-overview
+      slug: example-overview
+      title: Example overview
+      panels:
+        request-rate: { id: 1 }
+ci:
+  enabled: true
+  provider: github
+  allowlist:
+    - repo: ORG/REPOSITORY
+      workflows: [ci.yml]
+  github:
+    api_base_url: https://api.github.com
+    app:
+      app_id_file: /run/secrets/github-app-id
+      pem_key_file: /run/secrets/github-app-key
+      installations:
+        - owner: ORG
+          installation_id_file: /run/secrets/github-installation-id
+  approval:
+    key_file: /run/secrets/approval-key
+    replay_file: /run/runtime/state/approval-replay.json
+    audit_file: /run/runtime/state/approval-audit.jsonl
