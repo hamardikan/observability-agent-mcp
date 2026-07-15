@@ -25,6 +25,7 @@ const ObserverFileConfigSchema = z.object({
       z.object({ owner: z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/), installation_id_file: z.string().min(1).max(1_024) }).strict(),
     ])).min(1).max(100),
     api_base_url: z.literal("https://api.github.com").default("https://api.github.com"),
+    webhook_secret_file: z.string().min(1).max(1_024).optional(),
   }).strict(),
   hermes: z.object({
     success_url: z.url().optional(),

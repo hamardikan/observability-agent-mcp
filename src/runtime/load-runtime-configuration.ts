@@ -21,6 +21,10 @@ import type { CIProviderRuntimeMetadata, CIService, CIProviderType } from "../ci
 import { GitHubActionsProvider } from "../providers/github-actions-provider.js";
 import { GitHubAppTokenProvider } from "../providers/github-app-token-provider.js";
 import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-token-provider.js";
+import { BitbucketSCMProvider, GitHubSCMProvider, JenkinsSCMProvider } from "../scm/index.js";
+import type { ForensicsProviderSet } from "../providers/ci-provider.js";
+import { SCMChangeEvidenceResultSchema as SCMAdapterResultSchema } from "../scm/schemas.js";
+import { SCMChangeEvidenceResultSchema as ForensicsSCMResultSchema } from "../domain/forensics-schemas.js";
 import { CIProviderRegistry } from "../providers/ci-provider-registry.js";
 import { READ_ONLY_CI_PROVIDER_CAPABILITIES, APPROVAL_GATED_CI_PROVIDER_CAPABILITIES } from "../domain/ci-provider-contracts.js";
 
@@ -140,12 +144,38 @@ const GitHubConfigSchema = z
       }
     }
   });
+const SCMForensicsSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    provider: CIProviderTypeSchema.optional(),
+    base_url: CIProviderBaseUrlSchema.optional(),
+    endpoint: CIProviderEndpointSchema.optional(),
+    token_file: z.string().min(1).max(1_024).optional(),
+    username: z.string().min(1).max(256).optional(),
+    job: z.string().min(1).max(512).optional(),
+    branch: z.string().min(1).max(256).regex(/^[^\s?#]+$/).optional(),
+    allowed_refs: z.array(z.string().min(1).max(256).regex(/^[^\s?#]+$/)).min(1).max(100).default(["main"]),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.base_url !== undefined && value.endpoint !== undefined) context.addIssue({ code: "custom", path: ["endpoint"], message: "configure one base_url or endpoint" });
+  });
+const TelemetryForensicsSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    query_template: LogicalIdSchema,
+  })
+  .strict();
+const ForensicsConfigSchema = z
+  .object({ scm: SCMForensicsSchema.optional(), telemetry: TelemetryForensicsSchema.optional() })
+  .strict();
 const NamedCIProviderSchema = z
   .object({
     type: CIProviderTypeSchema,
     github: GitHubConfigSchema.optional(),
     jenkins: JenkinsConfigSchema.optional(),
     bitbucket: BitbucketConfigSchema.optional(),
+    forensics: ForensicsConfigSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -170,6 +200,7 @@ const CIConfigSchema = z
       })
       .strict()
       .optional(),
+    forensics: ForensicsConfigSchema.optional(),
     max_freshness_seconds: z.number().int().min(1).max(3_600).default(300),
   })
   .strict();
@@ -391,7 +422,7 @@ export function loadRuntimeConfiguration(
     });
   }
 
-  const ci = buildCIConfiguration(configuration.ci, options);
+  const ci = buildCIConfiguration(configuration.ci, options, provider);
 
   return new LoadedRuntimeConfiguration(
     configuration.profile,
@@ -412,6 +443,7 @@ interface ResolvedCIProviderConfiguration {
   readonly github?: CIConfiguration["github"];
   readonly jenkins?: CIConfiguration["jenkins"];
   readonly bitbucket?: CIConfiguration["bitbucket"];
+  readonly forensics?: CIConfiguration["forensics"];
 }
 
 interface ResolvedCIProvider {
@@ -425,7 +457,7 @@ function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
     const selected = name === undefined ? undefined : configuration.providers[name];
     if (name === undefined || selected === undefined) throw new Error("Invalid CI runtime configuration");
     return {
-      configuration: { name, type: selected.type, github: selected.github, jenkins: selected.jenkins, bitbucket: selected.bitbucket },
+      configuration: { name, type: selected.type, github: selected.github, jenkins: selected.jenkins, bitbucket: selected.bitbucket, forensics: selected.forensics },
       metadata: {
         name,
         type: selected.type,
@@ -435,7 +467,7 @@ function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
     };
   }
   return {
-    configuration: { name: configuration.provider, type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket },
+    configuration: { name: configuration.provider, type: configuration.provider, github: configuration.github, jenkins: configuration.jenkins, bitbucket: configuration.bitbucket, forensics: configuration.forensics },
     metadata: {
       name: configuration.provider,
       type: configuration.provider,
@@ -448,6 +480,7 @@ function resolveCIProvider(configuration: CIConfiguration): ResolvedCIProvider {
 function buildCIConfiguration(
   configuration: CIConfiguration | undefined,
   options: LoadRuntimeConfigurationOptions,
+  observabilityProvider: ObservabilityProvider | undefined,
 ): CIService | undefined {
   if (configuration?.enabled !== true) return undefined;
   if (configuration.allowlist.length === 0) {
@@ -504,13 +537,164 @@ function buildCIConfiguration(
       : READ_ONLY_CI_PROVIDER_CAPABILITIES,
     provider,
   }]);
+  const forensics = buildForensics(selected.configuration, provider, repositories, options, observabilityProvider, clock);
   return {
     provider,
     policy: createCIAllowlist(Object.fromEntries(configuration.allowlist.map((entry) => [entry.repo, entry.workflows]))),
     runtimeMetadata: selected.metadata,
     providerRegistry,
+    ...(forensics === undefined ? {} : { forensics }),
     ...(approval === undefined ? {} : { approval }),
   };
+}
+
+function buildForensics(
+  configuration: ResolvedCIProviderConfiguration,
+  provider: CIService["provider"],
+  repositories: readonly string[],
+  options: LoadRuntimeConfigurationOptions,
+  observabilityProvider: ObservabilityProvider | undefined,
+  clock: Clock,
+): ForensicsProviderSet | undefined {
+  const configured = configuration.forensics;
+  if (configured === undefined) return undefined;
+  const result: { scm?: ForensicsProviderSet["scm"]; telemetry?: ForensicsProviderSet["telemetry"] } = {};
+  if (configured.scm?.enabled === true) {
+    const type = configured.scm.provider ?? configuration.type;
+    if (type !== configuration.type) throw new Error("Invalid CI runtime configuration");
+    const selected = type === "github" ? configuration.github : type === "jenkins" ? configuration.jenkins : configuration.bitbucket;
+    const baseUrl = configured.scm.endpoint === undefined
+      ? configured.scm.base_url ?? providerBaseUrl(selected)
+      : new URL(configured.scm.endpoint.path, configured.scm.endpoint.origin).toString();
+    if (baseUrl === undefined) throw new Error("Invalid CI runtime configuration");
+    const allowedRefs = configured.scm.allowed_refs;
+    const bitbucketTokenFile = configured.scm.token_file ?? configuration.bitbucket?.token_file;
+    const scmAdapter = type === "github"
+      ? new GitHubSCMProvider({ tokenProvider: buildGitHubReadTokenProvider(configuration, repositories, options, clock), fetch: options.fetch, clock, apiBaseUrl: baseUrl, allowedRepositories: repositories, allowedRefs })
+      : type === "jenkins"
+        ? configured.scm.job === undefined
+          ? (() => { throw new Error("Invalid CI runtime configuration"); })()
+          : new JenkinsSCMProvider({ baseUrl, job: configured.scm.job, ...(configured.scm.branch === undefined ? {} : { branch: configured.scm.branch }), ...(configured.scm.token_file === undefined ? {} : { tokenFile: configured.scm.token_file }), ...(configured.scm.username === undefined ? {} : { username: configured.scm.username }), fetch: options.fetch, clock, allowedRepositories: repositories, allowedRefs })
+        : new BitbucketSCMProvider({ baseUrl, ...(bitbucketTokenFile === undefined ? {} : { tokenFile: bitbucketTokenFile }), ...(configured.scm.username === undefined ? {} : { username: configured.scm.username }), fetch: options.fetch, clock, allowedRepositories: repositories, allowedRefs });
+    result.scm = wrapSCMProvider(scmAdapter);
+  }
+  if (configured.telemetry?.enabled === true) {
+    if (observabilityProvider === undefined) throw new Error("Invalid CI runtime configuration");
+    const telemetry = configured.telemetry;
+    result.telemetry = {
+      async getTelemetryCorrelation(_input) {
+        const metrics = await observabilityProvider.queryMetrics({ queryTemplate: telemetry.query_template });
+        const signals = metrics.data.series.slice(0, 20).map((series, index) => ({
+          id: `metric-${index + 1}`,
+          kind: "metric" as const,
+          state: series.samples.length === 0 ? "unknown" as const : "normal" as const,
+          summary: "Configured metrics evidence available",
+          observedAt: metrics.observedAt,
+        }));
+        return {
+          schemaVersion: "1.0" as const,
+          observedAt: metrics.observedAt,
+          providerClass: metrics.providerClass,
+          freshness: metrics.freshness,
+          truncated: metrics.truncated || metrics.data.series.length > signals.length,
+          redactionsApplied: metrics.redactionsApplied,
+          warnings: metrics.warnings,
+          data: signals.length === 0
+            ? { available: false as const, unavailable: { code: "no-metrics", message: "Configured metrics evidence unavailable" } }
+            : { available: true as const, signals },
+        };
+      },
+    };
+  }
+  if (result.scm === undefined && result.telemetry === undefined) return undefined;
+  return {
+    ...(result.scm === undefined ? {} : { scm: result.scm }),
+    ...(result.telemetry === undefined ? {} : { telemetry: result.telemetry }),
+  };
+}
+
+function providerBaseUrl(configuration: unknown): string | undefined {
+  if (configuration === null || typeof configuration !== "object") return undefined;
+  const value = configuration as Record<string, unknown>;
+  const endpoint = value.api_endpoint ?? value.endpoint;
+  if (endpoint !== null && typeof endpoint === "object" && !Array.isArray(endpoint)) {
+    const configured = endpoint as { origin?: unknown; path?: unknown };
+    if (typeof configured.origin === "string" && typeof configured.path === "string") return new URL(configured.path, configured.origin).toString();
+  }
+  const baseUrl = value.api_base_url ?? value.base_url;
+  return typeof baseUrl === "string" ? baseUrl : undefined;
+}
+
+function wrapSCMProvider(adapter: {
+  getChangeEvidence(input: { repository: string; commit?: string; ref?: string; budget?: { maxBytes?: number; maxItems?: number; maxTokens?: number } }): Promise<unknown>;
+}): NonNullable<ForensicsProviderSet["scm"]> {
+  return {
+    async getChangeEvidence(input) {
+      const raw = SCMAdapterResultSchema.parse(await adapter.getChangeEvidence({
+        repository: input.repo,
+        commit: input.headSha,
+        budget: {
+          maxBytes: 512 * 1_024,
+          maxItems: input.maxChanges,
+          maxTokens: Math.max(64, Math.min(64 * 1_024, input.maxChanges * input.maxHunkLines * 8)),
+        },
+      }));
+      const changes = raw.data.files.slice(0, input.maxChanges).map((file) => ({
+        path: file.path,
+        changeType: file.status === "removed" ? "deleted" as const : file.status === "renamed" ? "renamed" as const : file.status === "added" ? "added" as const : "modified" as const,
+        additions: file.additions,
+        deletions: file.deletions,
+        hunks: file.patch === undefined ? [] : [{
+          header: "@@",
+          lines: file.patch.split(/\r?\n/).slice(0, input.maxHunkLines),
+        }],
+      }));
+      return ForensicsSCMResultSchema.parse({
+        schemaVersion: "1.0",
+        observedAt: raw.observedAt,
+        providerClass: raw.providerClass,
+        freshness: raw.freshness,
+        truncated: raw.truncated || raw.data.files.length > changes.length,
+        redactionsApplied: raw.redactionsApplied,
+        warnings: raw.warnings,
+        data: changes.length === 0
+          ? { available: false, unavailable: { code: "no-changes", message: "Configured SCM evidence unavailable" } }
+          : { available: true, changes },
+      });
+    },
+  };
+}
+
+function buildGitHubReadTokenProvider(
+  configuration: ResolvedCIProviderConfiguration,
+  repositories: readonly string[],
+  options: LoadRuntimeConfigurationOptions,
+  clock: Clock,
+) {
+  const github = configuration.github;
+  const app = github?.app;
+  if (github === undefined || app === undefined) throw new Error("Invalid CI runtime configuration");
+  return app.installations !== undefined
+    ? MappedGitHubAppTokenProvider.fromFiles({
+        appIdFile: app.app_id_file,
+        pemKeyFile: app.pem_key_file,
+        installations: app.installations.map((entry) => "repo" in entry ? { repo: entry.repo, installationIdFile: entry.installation_id_file } : { owner: entry.owner, installationIdFile: entry.installation_id_file }),
+        repositories,
+        fetch: options.fetch,
+        clock,
+        ...(github.api_endpoint === undefined ? { apiBaseUrl: github.api_base_url ?? "https://api.github.com" } : { apiEndpoint: github.api_endpoint }),
+        actionsPermission: "read",
+      })
+    : GitHubAppTokenProvider.fromPemFile({
+        appId: readNumericSecretFile(app.app_id_file),
+        installationId: readNumericSecretFile(app.installation_id_file ?? ""),
+        pemKeyFile: app.pem_key_file,
+        allowedRepositories: repositories,
+        fetch: options.fetch,
+        clock,
+        ...(github.api_endpoint === undefined ? { apiBaseUrl: github.api_base_url ?? "https://api.github.com" } : { apiEndpoint: github.api_endpoint }),
+        actionsPermission: "read",
+      });
 }
 
 function buildGitHubProvider(

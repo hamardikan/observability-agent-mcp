@@ -241,6 +241,32 @@ ci:
     });
   });
 
+  it("wires opt-in SCM and telemetry providers into the loaded capability surface", () => {
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}
+ci:
+  enabled: true
+  provider: jenkins
+  allowlist:
+    - repo: academytools/planpal-infra-6
+      workflows: [planpal-infra-6]
+  jenkins:
+    base_url: https://jenkins.local
+  forensics:
+    scm:
+      job: academytools/planpal-infra-6
+      allowed_refs: [main]
+    telemetry:
+      query_template: homelab-node-up
+`);
+
+    const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
+
+    expect(runtime.ci?.forensics?.scm).toBeDefined();
+    expect(runtime.ci?.forensics?.telemetry).toBeDefined();
+    expect(JSON.stringify(runtime.runtimeMetadata)).not.toContain(directory);
+    expect(JSON.stringify(runtime.runtimeMetadata)).not.toContain("grafana-test-token-123456");
+  });
+
   it("keeps runtime CI reads on Actions read and reruns on a separate write token", async () => {
     const appIdPath = join(directory, "github-app-id");
     const installationIdPath = join(directory, "github-installation-id");

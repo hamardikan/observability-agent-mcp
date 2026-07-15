@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { CIRepositorySchema, CIRunIdSchema, CIWorkflowSchema, type CIWorkflowRun } from "../domain/ci-schemas.js";
 import { redactMetadata } from "../ci/redaction.js";
@@ -454,15 +455,14 @@ export class ObserverRuntime {
         return { target: currentTarget, failed: true, delivered, deliveryFailures };
       }
 
-      if (analysisRequired) {
-        if (analysisDelivered) continue;
-        const analysisEvent = await this.buildEvent(run, outcome, options.now, true, options.source);
-        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, delivery: "pending", analysisDelivery: "pending" });
+      if (!statusDelivered) {
+        const statusEvent = await this.buildEvent(run, outcome, options.now, false, options.source);
+        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
         options.state.targets[options.targetKey] = currentTarget;
         this.#state.save(withUpdatedAt(options.state, options.now));
         try {
-          await this.#deliver(serializeObserverEvent(analysisEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "analysis"), "analysis");
-          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString(), analysisDelivery: "delivered", analysisDeliveredAt: options.now.toISOString() });
+          await this.#deliver(serializeObserverEvent(statusEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "status"), "success");
+          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString() });
           options.state.targets[options.targetKey] = currentTarget;
           this.#state.save(withUpdatedAt(options.state, options.now));
           this.#metrics.recordDelivery();
@@ -475,17 +475,16 @@ export class ObserverRuntime {
           this.#state.save(withUpdatedAt(options.state, options.now));
           return { target: currentTarget, failed: true, delivered, deliveryFailures };
         }
-        continue;
       }
 
-      if (!statusDelivered) {
-        const statusEvent = await this.buildEvent(run, outcome, options.now, false, options.source);
-        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
+      if (analysisRequired && !analysisDelivered) {
+        const analysisEvent = await this.buildEvent(run, outcome, options.now, true, options.source);
+        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisDelivery: "pending" });
         options.state.targets[options.targetKey] = currentTarget;
         this.#state.save(withUpdatedAt(options.state, options.now));
         try {
-          await this.#deliver(serializeObserverEvent(statusEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "status"), "success");
-          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString() });
+          await this.#deliver(serializeObserverEvent(analysisEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "analysis"), "analysis");
+          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisDelivery: "delivered", analysisDeliveredAt: options.now.toISOString() });
           options.state.targets[options.targetKey] = currentTarget;
           this.#state.save(withUpdatedAt(options.state, options.now));
           this.#metrics.recordDelivery();
@@ -594,7 +593,81 @@ export function createObserverRuntimeFromFiles(options: {
     backoffMs: config.deliveryBackoffMs,
     timeoutMs: config.deliveryTimeoutMs,
   });
-  return new ObserverRuntime({ config, provider, state, sink: delivery, clock });
+  const webhookVerifier = fileConfig.github.webhook_secret_file === undefined
+    ? undefined
+    : createGitHubWebhookVerifier(
+      readObserverSecretFile(fileConfig.github.webhook_secret_file),
+      config.allowlist,
+    );
+  const source = {
+    ...observerEventSourceFromProvider(provider),
+    ...(webhookVerifier === undefined ? {} : { webhookVerifier }),
+  };
+  return new ObserverRuntime({ config, provider, source, state, sink: delivery, clock });
+}
+
+export function createGitHubWebhookVerifier(
+  secret: Uint8Array,
+  allowlist: readonly { repo: string; workflows: readonly string[] }[],
+): ObserverEventSource["webhookVerifier"] {
+  if (secret.byteLength < 32) throw new Error("Webhook secret is missing or too short");
+  return {
+    async verify(request) {
+      if (request.body.length > 2 * 1_024 * 1_024) throw new Error("Invalid webhook");
+      if (headerValue(request.headers, "x-github-event") !== "workflow_run") throw new Error("Invalid webhook");
+      const supplied = headerValue(request.headers, "x-hub-signature-256");
+      if (supplied === undefined || !/^sha256=[a-f0-9]{64}$/.test(supplied)) throw new Error("Invalid webhook");
+      const expected = `sha256=${createHmac("sha256", secret).update(request.body, "utf8").digest("hex")}`;
+      const suppliedBytes = Buffer.from(supplied, "utf8");
+      const expectedBytes = Buffer.from(expected, "utf8");
+      if (suppliedBytes.length !== expectedBytes.length || !timingSafeEqual(suppliedBytes, expectedBytes)) throw new Error("Invalid webhook");
+
+      let payload: unknown;
+      try { payload = JSON.parse(request.body); } catch { throw new Error("Invalid webhook"); }
+      const normalized = normalizeGitHubWorkflowRun(payload, allowlist);
+      return normalized === undefined ? [] : [normalized];
+    },
+  };
+}
+
+function headerValue(headers: Readonly<Record<string, string | readonly string[] | undefined>>, name: string): string | undefined {
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name);
+  const value = entry?.[1];
+  if (typeof value === "string") return value;
+  return value?.length === 1 ? value[0] : undefined;
+}
+
+function normalizeGitHubWorkflowRun(payload: unknown, allowlist: readonly { repo: string; workflows: readonly string[] }[]): Record<string, unknown> | undefined {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Invalid webhook");
+  const root = payload as Record<string, unknown>;
+  const workflowRun = root.workflow_run;
+  const repository = root.repository;
+  if (workflowRun === null || typeof workflowRun !== "object" || Array.isArray(workflowRun) || repository === null || typeof repository !== "object" || Array.isArray(repository)) throw new Error("Invalid webhook");
+  const run = workflowRun as Record<string, unknown>;
+  const repo = (repository as Record<string, unknown>).full_name;
+  const workflow = workflowName(run, root.workflow);
+  if (typeof repo !== "string" || typeof workflow !== "string" || !allowlist.some((entry) => entry.repo === repo && entry.workflows.includes(workflow))) return undefined;
+  if (run.status !== "completed") return undefined;
+  const id = typeof run.id === "number" ? String(run.id) : run.id;
+  const conclusion = run.conclusion;
+  const runAttempt = run.run_attempt;
+  const event = run.event;
+  const ref = run.head_branch;
+  const sha = run.head_sha;
+  const createdAt = run.created_at;
+  const updatedAt = run.updated_at;
+  if (typeof id !== "string" || typeof runAttempt !== "number" || typeof event !== "string" || typeof ref !== "string" || typeof sha !== "string" || typeof createdAt !== "string" || typeof updatedAt !== "string") throw new Error("Invalid webhook");
+  if (conclusion !== null && conclusion !== "success" && conclusion !== "failure" && conclusion !== "cancelled" && conclusion !== "timed_out" && conclusion !== "skipped" && conclusion !== "neutral" && conclusion !== "action_required" && conclusion !== "unknown") throw new Error("Invalid webhook");
+  return { id, repository: repo, workflow, status: "completed", conclusion: conclusion as string | null, runAttempt, event, ref, sha: sha.toLowerCase(), createdAt, updatedAt };
+}
+
+function workflowName(run: Record<string, unknown>, workflow: unknown): string | undefined {
+  const candidates = [run.path, workflow !== null && typeof workflow === "object" && !Array.isArray(workflow) ? (workflow as Record<string, unknown>).path : undefined, run.name];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    return candidate.replace(/^\/?\.github\/workflows\//, "");
+  }
+  return undefined;
 }
 
 export function observerEventSourceFromProvider(provider: ObserverProvider): ObserverEventSource {

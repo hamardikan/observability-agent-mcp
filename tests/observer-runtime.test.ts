@@ -124,7 +124,7 @@ describe("portable observer runtime", () => {
       expect.objectContaining({ runId: "1", outcome: "failure" }),
       expect.objectContaining({ runId: "2", outcome: "success" }),
     ]));
-    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledTimes(3);
     expect(ci.listWorkflowRuns).toHaveBeenNthCalledWith(1, expect.objectContaining({
       page: 1,
       perPage: 100,
@@ -182,12 +182,13 @@ describe("portable observer runtime", () => {
     expect(ci.getFailedJobAnalysis).toHaveBeenCalledWith({ repo: "owner/repo", workflow: "ci.yml", runId: "1" });
     expect(ci.getLogEvidence).toHaveBeenCalledWith({ repo: "owner/repo", workflow: "ci.yml", runId: "1", jobId: "9", maxLines: 3 });
     expect(ci.getRemediationPlan).toHaveBeenCalledWith({ repo: "owner/repo", workflow: "ci.yml", runId: "1" });
-    expect(deliver.mock.calls[0]?.[2]).toBe("analysis");
-    expect(JSON.stringify(deliver.mock.calls[0]?.[0])).not.toContain("provider-secret");
-    expect(JSON.stringify(deliver.mock.calls[0]?.[0])).not.toContain("token=[REDACTED]");
-    expect(JSON.stringify(deliver.mock.calls[0]?.[0])).not.toContain('"failedSteps"');
-    expect(String(deliver.mock.calls[0]?.[0])).toContain('"ciEvidence"');
-    expect(String(deliver.mock.calls[0]?.[0])).toContain('"runbook":"docs/ci-cd-runbook.md#test"');
+    expect(deliver.mock.calls[0]?.[2]).toBe("success");
+    expect(deliver.mock.calls[1]?.[2]).toBe("analysis");
+    expect(JSON.stringify(deliver.mock.calls[1]?.[0])).not.toContain("provider-secret");
+    expect(JSON.stringify(deliver.mock.calls[1]?.[0])).not.toContain("token=[REDACTED]");
+    expect(JSON.stringify(deliver.mock.calls[1]?.[0])).not.toContain('"failedSteps"');
+    expect(String(deliver.mock.calls[1]?.[0])).toContain('"ciEvidence"');
+    expect(String(deliver.mock.calls[1]?.[0])).toContain('"runbook":"docs/ci-cd-runbook.md#test"');
   });
 
   it("delivers one bounded failure analysis notification", async () => {
@@ -195,11 +196,13 @@ describe("portable observer runtime", () => {
     const deliver = vi.fn().mockResolvedValue(undefined);
     const runtime = new ObserverRuntime({ config: config(), provider: ci, state: new InMemoryObserverStateStore(), deliver, clock: () => NOW });
 
-    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1 });
-    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["analysis"]);
-    expect(deliver.mock.calls.map((call) => call[1])).toEqual(["owner/repo:ci.yml:50:1:analysis"]);
-    expect(JSON.parse(String(deliver.mock.calls[0]?.[0])).type).toBe("ci.failure.analysis");
-    expect(JSON.parse(String(deliver.mock.calls[0]?.[0])).analysis).toBeDefined();
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2 });
+    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["success", "analysis"]);
+    expect(deliver.mock.calls.map((call) => call[1])).toEqual(["owner/repo:ci.yml:50:1:status", "owner/repo:ci.yml:50:1:analysis"]);
+    expect(JSON.parse(String(deliver.mock.calls[0]?.[0])).type).toBe("ci.run.observed");
+    expect(JSON.parse(String(deliver.mock.calls[0]?.[0])).outcome).toBe("failure");
+    expect(JSON.parse(String(deliver.mock.calls[1]?.[0])).type).toBe("ci.failure.analysis");
+    expect(JSON.parse(String(deliver.mock.calls[1]?.[0])).analysis).toBeDefined();
   });
 
   it("retries a failed analysis route without duplicating the direct status notice", async () => {
@@ -207,18 +210,19 @@ describe("portable observer runtime", () => {
     let now = NOW;
     const ci = provider({ listWorkflowRuns: vi.fn().mockResolvedValue({ runs: [run("51", "failure")], hasMore: false }) });
     const deliver = vi.fn()
+      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("analysis transport secret"))
       .mockResolvedValueOnce(undefined);
     const runtime = new ObserverRuntime({ config: config(), provider: ci, state, deliver, clock: () => now });
 
-    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 0 });
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1 });
     const recordAfterFailure = Object.values(state.load().targets)[0]?.seen["owner/repo:ci.yml:51:1"];
-    expect(recordAfterFailure).toMatchObject({ delivery: "pending", analysisDelivery: "pending" });
+    expect(recordAfterFailure).toMatchObject({ delivery: "delivered", statusDelivery: "delivered", analysisDelivery: "pending" });
     expect(state.load().targets["owner/repo\u001fci.yml"]).toMatchObject({ deliveryBackoffUntil: "2026-07-14T00:00:00.010Z" });
     now = new Date("2026-07-14T00:00:00.010Z");
     await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1 });
-    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["analysis", "analysis"]);
-    expect(deliver.mock.calls.map((call) => call[1])).toEqual(["owner/repo:ci.yml:51:1:analysis", "owner/repo:ci.yml:51:1:analysis"]);
+    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["success", "analysis", "analysis"]);
+    expect(deliver.mock.calls.map((call) => call[1])).toEqual(["owner/repo:ci.yml:51:1:status", "owner/repo:ci.yml:51:1:analysis", "owner/repo:ci.yml:51:1:analysis"]);
   });
 
   it("recovers both route delivery records after an observer restart", async () => {
@@ -234,7 +238,7 @@ describe("portable observer runtime", () => {
         clock: () => NOW,
       });
       await first.pollOnce();
-      expect(firstDelivery).toHaveBeenCalledTimes(1);
+      expect(firstDelivery).toHaveBeenCalledTimes(2);
       expect(Object.values(new FileObserverStateStore({ filePath: statePath, leaseMs: 30_000, clock: () => NOW }).load().targets)[0]?.seen["owner/repo:ci.yml:52:1"]).toMatchObject({ statusDelivery: "delivered", analysisDelivery: "delivered" });
 
       const secondDelivery = vi.fn().mockResolvedValue(undefined);
@@ -342,6 +346,20 @@ describe("portable observer runtime", () => {
     expect(poll).toMatchObject({ delivered: 0, observed: [] });
     expect(deliver).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(deliver.mock.calls[0]?.[0]))).toMatchObject({ source: "webhook", providerClass: "jenkins", eventId: "owner/repo:ci.yml:81:1" });
+  });
+
+  it("deduplicates both status and analysis across webhook then poll", async () => {
+    const candidate = run("85", "failure");
+    const source = {
+      listTerminalRuns: vi.fn().mockResolvedValue({ runs: [candidate], hasMore: false }),
+      webhookVerifier: { verify: vi.fn().mockResolvedValue([candidate]) },
+    };
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const runtime = new ObserverRuntime({ config: config(), provider: provider(), source, state: new InMemoryObserverStateStore(), deliver, clock: () => NOW });
+
+    await expect(runtime.ingestWebhook({ headers: {}, body: "signed" })).resolves.toMatchObject({ accepted: true, delivered: 2 });
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 0, observed: [] });
+    expect(deliver.mock.calls.map((call) => call[2])).toEqual(["success", "analysis"]);
   });
 
   it("does not redeliver a webhook after polling has settled the same run", async () => {
@@ -495,9 +513,9 @@ describe("observer state and Hermes delivery", () => {
     const deliver = vi.fn().mockResolvedValue(undefined);
     const runtime = new ObserverRuntime({ config: config(), provider: ci, state: new InMemoryObserverStateStore(), deliver, clock: () => NOW });
 
-    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1 });
-    expect(String(deliver.mock.calls[0]?.[0])).not.toContain("quota secret");
-    expect(String(deliver.mock.calls[0]?.[0])).toContain('"code":"ci-analysis-unavailable"');
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 2 });
+    expect(String(deliver.mock.calls[1]?.[0])).not.toContain("quota secret");
+    expect(String(deliver.mock.calls[1]?.[0])).toContain('"code":"ci-analysis-unavailable"');
   });
 
   it("recovers a cursor and dedupe record after an observer restart", async () => {

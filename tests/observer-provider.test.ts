@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { GitHubActionsProvider } from "../src/providers/github-actions-provider.
 import { loadObserverConfiguration, observerRuntimeConfig, readObserverSecretFile } from "../src/observer/config.js";
 import { MappedGitHubAppTokenProvider } from "../src/providers/mapped-github-app-token-provider.js";
 import { HermesDelivery, isTrustedHermesUrl } from "../src/observer/delivery.js";
+import { createObserverRuntimeFromFiles } from "../src/observer/runtime.js";
 
 const NOW = new Date("2026-07-14T00:00:00.000Z");
 const SHA = "b".repeat(40);
@@ -80,6 +81,65 @@ hermes:
       });
       chmodSync(configPath, 0o644);
       expect(() => loadObserverConfiguration(configPath)).toThrow("0600");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("injects a GitHub webhook secret into the runtime verifier without exposing it", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "observer-webhook-runtime-"));
+    try {
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const appIdPath = join(directory, "app-id");
+      const pemPath = join(directory, "app.pem");
+      const installationPath = join(directory, "installation-id");
+      const keyPath = join(directory, "hermes-key");
+      const statePath = join(directory, "state.json");
+      const webhookKey = "github-webhook-secret-that-is-long-enough";
+      writeFileSync(appIdPath, "123\n", { mode: 0o600 });
+      writeFileSync(pemPath, privateKey.export({ type: "pkcs1", format: "pem" }), { mode: 0o600 });
+      writeFileSync(installationPath, "456\n", { mode: 0o600 });
+      writeFileSync(keyPath, webhookKey, { mode: 0o600 });
+      writeFileSync(join(directory, "observer.yml"), `
+version: 1
+allowlist:
+  - repo: owner/repo
+    workflows: [ci.yml]
+state_file: ${statePath}
+github:
+  app_id_file: ${appIdPath}
+  pem_key_file: ${pemPath}
+  installations:
+    - owner: owner
+      installation_id_file: ${installationPath}
+  webhook_secret_file: ${keyPath}
+hermes:
+  success_url: https://hermes.example/events
+  analysis_url: https://hermes.example/analysis
+  trusted_internal_hosts: []
+  hmac_key_file: ${keyPath}
+`, { mode: 0o600 });
+      const body = JSON.stringify({
+        repository: { full_name: "owner/repo" },
+        workflow: { path: ".github/workflows/ci.yml" },
+        workflow_run: {
+          id: 99,
+          status: "completed",
+          conclusion: "success",
+          run_attempt: 1,
+          event: "push",
+          head_branch: "main",
+          head_sha: "a".repeat(40),
+          created_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      });
+      const signature = `sha256=${createHmac("sha256", webhookKey).update(body).digest("hex")}`;
+      const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+      const runtime = createObserverRuntimeFromFiles({ configPath: join(directory, "observer.yml"), fetch, clock: () => NOW });
+
+      await expect(runtime.ingestWebhook({ headers: { "x-github-event": "workflow_run", "x-hub-signature-256": signature }, body })).resolves.toMatchObject({ accepted: true, delivered: 1 });
+      expect(JSON.stringify(runtime)).not.toContain(webhookKey);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
