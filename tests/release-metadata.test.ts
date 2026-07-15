@@ -1,5 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -126,6 +128,25 @@ describe("release metadata", () => {
     expect(existsSync(join(root, "scripts/verify-published-image.mjs"))).toBe(true);
     expect(readText("scripts/verify-published-image.mjs")).toContain(".Provenance");
     expect(readText("scripts/verify-published-image.mjs")).toContain(".SBOM");
+  });
+
+  it("prepares a future version that passes metadata validation", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "pak-satpam-release-prepare-"));
+    try {
+      for (const relativePath of ["package.json", "package-lock.json", "server.json", "CHANGELOG.md", "scripts/prepare-release.mjs", "scripts/validate-package-metadata.mjs"]) {
+        const destination = join(temporary, relativePath);
+        const parent = dirname(destination);
+        mkdirSync(parent, { recursive: true });
+        cpSync(join(root, relativePath), destination);
+      }
+      cpSync(join(root, "src"), join(temporary, "src"), { recursive: true });
+      writeFileSync(join(temporary, "release-notes.md"), "Release preparation smoke.\n");
+
+      execFileSync(process.execPath, ["scripts/prepare-release.mjs", "--version", "0.3.0", "--date", "2026-07-16", "--notes-file", "release-notes.md"], { cwd: temporary, stdio: "pipe" });
+      execFileSync(process.execPath, ["scripts/validate-package-metadata.mjs", "--tag", "v0.3.0"], { cwd: temporary, stdio: "pipe" });
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
   });
 });
 

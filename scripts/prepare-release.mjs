@@ -24,6 +24,8 @@ execFileSync("npm", ["version", "--no-git-tag-version", "--ignore-scripts", vers
 const updatedPackage = readJson("package.json");
 const serverJson = readJson("server.json");
 serverJson.version = version;
+assert(Array.isArray(serverJson.packages), "server.json packages must be an array");
+serverJson.packages = serverJson.packages.map((entry) => ({ ...entry, version }));
 writeJson("server.json", serverJson);
 
 const sourceVersionPath = "src/version.ts";
