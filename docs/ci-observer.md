@@ -6,8 +6,7 @@ It turns allowlisted terminal GitHub Actions runs into signed internal events.
 ~~~text
 GitHub Actions -> bounded poll or verified workflow_run webhook
                -> metadata-only lease/cursor/dedupe state
-               -> success route
-               -> failure analysis route
+               -> red failure status / one-shot analysis / green recovery
                   (external agent may call Pak Satpam read tools)
 ~~~
 
@@ -42,13 +41,36 @@ workflow_run payload, a terminal run, and an allowlisted repository/workflow.
 Webhook and poll candidates share the event ID:
 
 ~~~text
-repository:workflow:provider-native-run-id:run-attempt
+repository:workflow:sha:conclusion
 ~~~
 
 Duplicates in one poll, across pages, across webhook/poll paths, and across
-restarts are suppressed by durable metadata-only state. Delivery state is kept
-separately for the status and analysis routes so a successful status delivery
-does not hide a failed analysis delivery.
+restarts are suppressed by durable metadata-only state. The recovery thread ID
+is stable for a repository/workflow pair:
+
+~~~text
+repository:workflow
+~~~
+
+Legacy version-1 records keyed by provider run ID remain readable and are
+aliased to the SHA/conclusion identity on first observation.
+
+## Goal 20 Notification Policy
+
+Fresh `failure`, `cancelled`, `timed_out`, and `action_required` conclusions
+emit one concise red status notification first. They may then perform at most
+one bounded analysis attempt, recorded before provider calls. A failed analysis
+delivery is not rebuilt on replay, restart, or another poll; transport retries
+remain bounded inside the configured delivery sink. `success`, `skipped`, and
+`neutral` conclusions are silent unless the target has a successfully delivered
+red notification. The first such healthy `success` emits exactly one concise
+green recovery on the stable repository/workflow thread; later successes are
+silent. A failed recovery delivery retains the existing delivery backoff and
+retries the same recovery identity, without creating another recovery event.
+
+Only bounded redacted notification metadata and transition markers are durable;
+analysis payloads, source, secrets, shell authority, and deployment authority
+are not persisted or expanded.
 
 ## Stale Suppression
 

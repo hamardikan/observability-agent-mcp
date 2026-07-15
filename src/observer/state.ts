@@ -11,6 +11,7 @@ export interface ObserverSeenRecord {
   readonly deliveredAt?: string;
   readonly statusDelivery?: ObserverDeliveryState;
   readonly statusDeliveredAt?: string;
+  readonly analysisAttempted?: boolean;
   readonly analysisDelivery?: ObserverDeliveryState;
   readonly analysisDeliveredAt?: string;
 }
@@ -23,6 +24,8 @@ export interface ObserverTargetState {
   readonly backoffMs?: number;
   readonly deliveryBackoffUntil?: string;
   readonly deliveryBackoffMs?: number;
+  readonly incidentActive?: boolean;
+  readonly recoveryEventId?: string;
 }
 
 export interface ObserverStateDocument {
@@ -134,6 +137,8 @@ function isStateDocument(value: unknown): value is ObserverStateDocument {
     if (record.backoffMs !== undefined && (typeof record.backoffMs !== "number" || !Number.isInteger(record.backoffMs) || record.backoffMs < 1 || record.backoffMs > 5 * 60_000)) return false;
     if (record.deliveryBackoffUntil !== undefined && typeof record.deliveryBackoffUntil !== "string") return false;
     if (record.deliveryBackoffMs !== undefined && (typeof record.deliveryBackoffMs !== "number" || !Number.isInteger(record.deliveryBackoffMs) || record.deliveryBackoffMs < 1 || record.deliveryBackoffMs > 5 * 60_000)) return false;
+    if (record.incidentActive !== undefined && typeof record.incidentActive !== "boolean") return false;
+    if (record.recoveryEventId !== undefined && (typeof record.recoveryEventId !== "string" || record.recoveryEventId.length > 256)) return false;
     if (record.seen === null || typeof record.seen !== "object" || Array.isArray(record.seen)) return false;
     for (const seen of Object.values(record.seen as Record<string, unknown>)) {
       if (seen === null || typeof seen !== "object" || Array.isArray(seen)) return false;
@@ -141,6 +146,7 @@ function isStateDocument(value: unknown): value is ObserverStateDocument {
       if (typeof item.outcome !== "string" || typeof item.observedAt !== "string" || !["pending", "delivered", "suppressed"].includes(String(item.delivery))) return false;
       if (item.statusDelivery !== undefined && !["pending", "delivered", "suppressed"].includes(String(item.statusDelivery))) return false;
       if (item.statusDeliveredAt !== undefined && typeof item.statusDeliveredAt !== "string") return false;
+      if (item.analysisAttempted !== undefined && typeof item.analysisAttempted !== "boolean") return false;
       if (item.analysisDelivery !== undefined && !["pending", "delivered", "suppressed"].includes(String(item.analysisDelivery))) return false;
       if (item.analysisDeliveredAt !== undefined && typeof item.analysisDeliveredAt !== "string") return false;
     }

@@ -31,6 +31,23 @@ The local contract tests cover:
 This status describes implementation and tests at the audit baseline. It is not a
 publication or deployment receipt.
 
+## Goal 20 Condition
+
+The CI observer notification policy is implemented locally. Fresh terminal
+failures, cancellations, timeouts, and action-required results emit state-
+transition-only red status notifications and allow one durable, deduplicated
+analysis attempt. Successes are silent except for the first healthy terminal
+success after a successfully delivered non-success, which emits one green
+recovery on a stable repository/workflow thread. SHA/conclusion event identity,
+webhook/poll/restart/replay dedupe, optional state-field migration, bounded
+metadata, and the existing cursor/lease/backoff contracts are covered by the
+observer runtime tests.
+
+Goal 20 does not change source, secret, shell, deploy, or provider authority.
+Analysis transport retries remain bounded at the configured sink; a failed
+runtime analysis attempt is not rebuilt because doing so would invoke analysis
+again and violate the one-attempt policy.
+
 ## Implemented Product
 
 - npm package identity @hmrdkn-labs/pak-satpam and MCP identity
@@ -44,8 +61,8 @@ publication or deployment receipt.
 - non-root OCI packaging for linux/amd64 and linux/arm64;
 - metadata-only doctor diagnostics and file-injected credentials;
 - optional observer polling, verified GitHub workflow_run webhook intake,
-  durable lease/dedupe state, stale suppression, signed routes, and sanitized
-  health/metrics.
+  durable lease/dedupe state, stale suppression, signed routes, sanitized
+  health/metrics, and Goal 20 state-transition-only notifications.
 
 ## Provider Status
 

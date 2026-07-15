@@ -207,9 +207,9 @@ describe("Goal 19 CP3 integration", () => {
     };
     const runtime = new ObserverRuntime({ config, provider, state: new InMemoryObserverStateStore(), deliver, clock: () => NOW });
 
-    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 1 });
+    await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 0 });
     await expect(runtime.pollOnce()).resolves.toMatchObject({ delivered: 0, observed: [] });
-    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it("registers only declared read capabilities and isolates a Jenkins runtime from GitHub rerun", async () => {

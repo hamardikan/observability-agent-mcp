@@ -34,6 +34,9 @@ export interface ObserverEvent {
   readonly runAttempt: number;
   readonly terminalConclusion: CIWorkflowRun["conclusion"];
   readonly outcome: ObserverOutcome;
+  readonly notification: "failure" | "recovery";
+  readonly severity: "red" | "green";
+  readonly threadId: string;
   readonly freshness: "fresh" | "stale";
   readonly updatedAt: string;
   readonly analysis?: unknown;
@@ -404,6 +407,7 @@ export class ObserverRuntime {
     errors: Array<{ repo: string; workflow: string; outcome: "unavailable" | "malformed" }>;
   }): Promise<ReconcileResult> {
     let currentTarget = options.currentTarget;
+    if (currentTarget.incidentActive === undefined) currentTarget = { ...currentTarget, incidentActive: hasDeliveredNonSuccess(currentTarget) };
     let delivered = 0;
     let deliveryFailures = 0;
     const deliveryBackoffUntil = currentTarget.deliveryBackoffUntil === undefined ? undefined : Date.parse(currentTarget.deliveryBackoffUntil);
@@ -426,13 +430,22 @@ export class ObserverRuntime {
       const eventId = observerEventId(run);
       if (attempted.has(eventId)) continue;
       attempted.add(eventId);
-      const prior = (options.state.targets[options.targetKey] ?? currentTarget).seen[eventId];
-      const statusDelivered = isSettledDelivery(prior?.statusDelivery) || isSettledDelivery(prior?.delivery);
+      const legacyEventId = legacyObserverEventId(run);
+      const existingTarget = options.state.targets[options.targetKey] ?? currentTarget;
+      const prior = existingTarget.seen[eventId] ?? existingTarget.seen[legacyEventId];
+      if (prior !== undefined && existingTarget.seen[eventId] === undefined) {
+        currentTarget = markSeen(currentTarget, eventId, {
+          ...prior,
+          ...(prior.analysisAttempted === undefined && prior.analysisDelivery !== undefined ? { analysisAttempted: true } : {}),
+        });
+        options.state.targets[options.targetKey] = currentTarget;
+      }
+      const currentRecord = currentTarget.seen[eventId];
+      const statusDelivered = isSettledDelivery(currentRecord?.statusDelivery) || isSettledDelivery(currentRecord?.delivery);
       const analysisRequired = isAnalysisConclusion(run.conclusion);
-      const analysisDelivered = !analysisRequired || isSettledDelivery(prior?.analysisDelivery);
-      if (statusDelivered && analysisDelivered) continue;
-
+      const analysisAttempted = currentRecord?.analysisAttempted === true || currentRecord?.analysisDelivery !== undefined;
       const outcome = outcomeForRun(run, options.now, this.#config.staleAfterMs);
+      if (statusDelivered && (!analysisRequired || analysisAttempted) && (outcome !== "success" || (currentTarget.incidentActive !== true && currentTarget.recoveryEventId === undefined))) continue;
       this.#metrics.recordObservation(outcome);
       options.observed.push({ eventId, runId: run.id, outcome });
       if (outcome === "stale") {
@@ -448,20 +461,45 @@ export class ObserverRuntime {
         this.#metrics.recordSuppressed();
         continue;
       }
-      if (deliveryBackoffUntil !== undefined && Number.isFinite(deliveryBackoffUntil) && deliveryBackoffUntil > options.now.getTime()) {
-        this.#metrics.recordTargetError("unavailable");
-        options.errors.push({ repo: options.target.repo, workflow: options.target.workflow, outcome: "unavailable" });
-        return { target: currentTarget, failed: true, delivered, deliveryFailures };
-      }
 
-      if (!statusDelivered) {
-        const statusEvent = await this.buildEvent(run, outcome, options.now, false, options.source);
-        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
+      if (outcome === "success") {
+        if (currentTarget.incidentActive !== true && currentTarget.recoveryEventId === undefined) {
+          if (currentRecord === undefined) {
+            currentTarget = markSeen(currentTarget, eventId, { outcome, observedAt: options.now.toISOString(), delivery: "suppressed", statusDelivery: "suppressed" });
+            options.state.targets[options.targetKey] = currentTarget;
+            this.#state.save(withUpdatedAt(options.state, options.now));
+            this.#metrics.recordSuppressed();
+          }
+          continue;
+        }
+
+        const hasRecoveryIdentity = currentTarget.recoveryEventId !== undefined;
+        const recoveryEventId = currentTarget.recoveryEventId ?? eventId;
+        currentTarget = { ...currentTarget, recoveryEventId };
+        const recoveryRecord = currentTarget.seen[recoveryEventId];
+        const recoveryDelivered = hasRecoveryIdentity && (recoveryRecord?.statusDelivery === "delivered" || recoveryRecord?.delivery === "delivered");
+        if (recoveryDelivered) {
+          const cleared = { ...currentTarget };
+          delete cleared.recoveryEventId;
+          currentTarget = { ...cleared, incidentActive: false };
+          options.state.targets[options.targetKey] = currentTarget;
+          this.#state.save(withUpdatedAt(options.state, options.now));
+          continue;
+        }
+        if (deliveryBackoffUntil !== undefined && Number.isFinite(deliveryBackoffUntil) && deliveryBackoffUntil > options.now.getTime()) {
+          this.#metrics.recordTargetError("unavailable");
+          options.errors.push({ repo: options.target.repo, workflow: options.target.workflow, outcome: "unavailable" });
+          return { target: currentTarget, failed: true, delivered, deliveryFailures };
+        }
+        const recoveryEvent = await this.buildEvent(run, outcome, options.now, false, options.source, "recovery", recoveryEventId);
+        currentTarget = markSeen(currentTarget, recoveryEventId, { outcome, observedAt: recoveryEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
         options.state.targets[options.targetKey] = currentTarget;
         this.#state.save(withUpdatedAt(options.state, options.now));
         try {
-          await this.#deliver(serializeObserverEvent(statusEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "status"), "success");
-          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString() });
+          await this.#deliver(serializeObserverEvent(recoveryEvent, this.#config.maxPayloadBytes), deliveryEventId(recoveryEventId, "status"), "success");
+          const cleared = { ...currentTarget };
+          delete cleared.recoveryEventId;
+          currentTarget = markSeen({ ...cleared, incidentActive: false }, recoveryEventId, { outcome, observedAt: recoveryEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString() });
           options.state.targets[options.targetKey] = currentTarget;
           this.#state.save(withUpdatedAt(options.state, options.now));
           this.#metrics.recordDelivery();
@@ -474,11 +512,55 @@ export class ObserverRuntime {
           this.#state.save(withUpdatedAt(options.state, options.now));
           return { target: currentTarget, failed: true, delivered, deliveryFailures };
         }
+        continue;
       }
 
-      if (analysisRequired && !analysisDelivered) {
+      if (!analysisRequired) {
+        currentTarget = markSeen(currentTarget, eventId, { outcome, observedAt: options.now.toISOString(), delivery: "suppressed", statusDelivery: "suppressed" });
+        options.state.targets[options.targetKey] = currentTarget;
+        this.#state.save(withUpdatedAt(options.state, options.now));
+        this.#metrics.recordSuppressed();
+        continue;
+      }
+
+      if (deliveryBackoffUntil !== undefined && Number.isFinite(deliveryBackoffUntil) && deliveryBackoffUntil > options.now.getTime()) {
+        this.#metrics.recordTargetError("unavailable");
+        options.errors.push({ repo: options.target.repo, workflow: options.target.workflow, outcome: "unavailable" });
+        return { target: currentTarget, failed: true, delivered, deliveryFailures };
+      }
+
+      if (!statusDelivered) {
+        const statusEvent = await this.buildEvent(run, outcome, options.now, false, options.source, "failure", eventId);
+        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "pending", statusDelivery: "pending" });
+        options.state.targets[options.targetKey] = currentTarget;
+        this.#state.save(withUpdatedAt(options.state, options.now));
+        try {
+          await this.#deliver(serializeObserverEvent(statusEvent, this.#config.maxPayloadBytes), deliveryEventId(eventId, "status"), "success");
+          currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: statusEvent.observedAt, delivery: "delivered", deliveredAt: options.now.toISOString(), statusDelivery: "delivered", statusDeliveredAt: options.now.toISOString() });
+          currentTarget = { ...currentTarget, incidentActive: true };
+          options.state.targets[options.targetKey] = currentTarget;
+          this.#state.save(withUpdatedAt(options.state, options.now));
+          this.#metrics.recordDelivery();
+          delivered += 1;
+        } catch {
+          this.#metrics.recordDeliveryFailure();
+          deliveryFailures += 1;
+          currentTarget = withDeliveryBackoff(currentTarget, options.now, this.#config.deliveryBackoffMs);
+          options.state.targets[options.targetKey] = currentTarget;
+          this.#state.save(withUpdatedAt(options.state, options.now));
+          return { target: currentTarget, failed: true, delivered, deliveryFailures };
+        }
+      } else {
+        currentTarget = { ...currentTarget, incidentActive: true };
+      }
+
+      const latestRecord = currentTarget.seen[eventId];
+      if (!latestRecord?.analysisAttempted && latestRecord?.analysisDelivery === undefined) {
+        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: options.now.toISOString(), analysisAttempted: true, analysisDelivery: "pending" });
+        options.state.targets[options.targetKey] = currentTarget;
+        this.#state.save(withUpdatedAt(options.state, options.now));
         const analysisEvent = await this.buildEvent(run, outcome, options.now, true, options.source);
-        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisDelivery: "pending" });
+        currentTarget = markSeen(options.state.targets[options.targetKey] ?? currentTarget, eventId, { outcome, observedAt: analysisEvent.observedAt, analysisAttempted: true, analysisDelivery: "pending" });
         options.state.targets[options.targetKey] = currentTarget;
         this.#state.save(withUpdatedAt(options.state, options.now));
         try {
@@ -504,7 +586,7 @@ export class ObserverRuntime {
 
   private targetCount(): number { return targets(this.#config).length; }
 
-  private async buildEvent(run: CIWorkflowRun, outcome: ObserverOutcome, now: Date, includeAnalysis: boolean, source: ObserverEventSourceKind): Promise<ObserverEvent | AgentNotificationPayload> {
+  private async buildEvent(run: CIWorkflowRun, outcome: ObserverOutcome, now: Date, includeAnalysis: boolean, source: ObserverEventSourceKind, notification: "failure" | "recovery" = "failure", eventId = observerEventId(run)): Promise<ObserverEvent | AgentNotificationPayload> {
     const warnings: Array<{ code: string; message: string }> = [];
     if (includeAnalysis && isAnalysisConclusion(run.conclusion)) {
       const input = { repo: run.repository, workflow: run.workflow, runId: run.id };
@@ -528,16 +610,16 @@ export class ObserverRuntime {
           input: { ...input, maxJobs: this.#config.maxFailedJobs, maxLogLines: this.#config.maxLogLines },
           clock: () => now,
         });
-        return buildAgentNotificationPayload({ analysis: assembled, eventId: observerEventId(run), source, maxBytes: this.#config.maxPayloadBytes });
+        return buildAgentNotificationPayload({ analysis: assembled, eventId, source, maxBytes: this.#config.maxPayloadBytes });
       } catch (error) {
         const fallback = makeUnavailableFailureAnalysis({ run: { ...run, status: "completed" }, observedAt: now, ...(this.#source.providerClass === undefined ? {} : { providerClass: this.#source.providerClass }), code: providerErrorOutcome(error) });
-        return buildAgentNotificationPayload({ analysis: fallback, eventId: observerEventId(run), source, maxBytes: this.#config.maxPayloadBytes });
+        return buildAgentNotificationPayload({ analysis: fallback, eventId, source, maxBytes: this.#config.maxPayloadBytes });
       }
     }
     return {
       schemaVersion: "1.0",
       type: "ci.run.observed",
-      eventId: observerEventId(run),
+      eventId,
       observedAt: now.toISOString(),
       source,
       ...(this.#source.providerClass === undefined ? {} : { providerClass: this.#source.providerClass }),
@@ -547,6 +629,9 @@ export class ObserverRuntime {
       runAttempt: run.runAttempt,
       terminalConclusion: run.conclusion,
       outcome,
+      notification,
+      severity: notification === "recovery" ? "green" : "red",
+      threadId: observerThreadId(run),
       freshness: outcome === "stale" ? "stale" : "fresh",
       updatedAt: run.updatedAt,
       warnings,
@@ -659,8 +744,12 @@ function workflowName(run: Record<string, unknown>, workflow: unknown): string |
 
 export { observerEventSourceFromProvider } from "./events.js";
 
-export function observerEventId(run: Pick<CIWorkflowRun, "repository" | "workflow" | "id" | "runAttempt">): string {
-  return `${run.repository}:${run.workflow}:${run.id}:${run.runAttempt}`;
+export function observerEventId(run: Pick<CIWorkflowRun, "repository" | "workflow" | "sha" | "conclusion">): string {
+  return `${run.repository}:${run.workflow}:${run.sha}:${run.conclusion ?? "unknown"}`;
+}
+
+export function observerThreadId(run: Pick<CIWorkflowRun, "repository" | "workflow">): string {
+  return `${run.repository}:${run.workflow}`;
 }
 
 export function outcomeForRun(run: Pick<CIWorkflowRun, "status" | "conclusion" | "updatedAt">, now: Date, staleAfterMs: number): ObserverOutcome {
@@ -732,6 +821,14 @@ function createdAfterWithOverlap(cursor: string, overlapMs: number): string | un
 
 function isAnalysisConclusion(conclusion: CIWorkflowRun["conclusion"]): boolean {
   return conclusion === "failure" || conclusion === "cancelled" || conclusion === "timed_out" || conclusion === "action_required";
+}
+
+function legacyObserverEventId(run: Pick<CIWorkflowRun, "repository" | "workflow" | "id" | "runAttempt">): string {
+  return `${run.repository}:${run.workflow}:${run.id}:${run.runAttempt}`;
+}
+
+function hasDeliveredNonSuccess(target: ObserverTargetState): boolean {
+  return Object.values(target.seen).some((record) => isAnalysisConclusion(record.outcome as CIWorkflowRun["conclusion"]) && (record.statusDelivery === "delivered" || record.delivery === "delivered"));
 }
 
 function outcomeForProviderError(error: unknown): "unavailable" | "malformed" {
@@ -808,6 +905,9 @@ function serializeObserverEvent(event: ObserverEvent | AgentNotificationPayload,
     runAttempt: event.runAttempt,
     terminalConclusion: event.terminalConclusion,
     outcome: event.outcome,
+    notification: event.notification,
+    severity: event.severity,
+    threadId: event.threadId,
     freshness: event.freshness,
     updatedAt: event.updatedAt,
     warnings: [{ code: "payload_truncated", message: "Bounded evidence omitted" }],
@@ -837,7 +937,7 @@ function markSeen(target: ObserverTargetState, eventId: string, record: Pick<Obs
 function pruneSeen(target: ObserverTargetState): ObserverTargetState {
   const entries = Object.entries(target.seen);
   if (entries.length <= 1_000) return target;
-  const retained = entries.filter(([, record]) => record.delivery === "pending" || record.analysisDelivery === "pending").concat(entries.filter(([, record]) => record.delivery === "delivered" && record.analysisDelivery !== "pending").slice(-900));
+  const retained = entries.filter(([, record]) => record.delivery === "pending" || (record.analysisDelivery === "pending" && record.analysisAttempted !== true)).concat(entries.filter(([, record]) => record.delivery === "delivered" && record.analysisDelivery !== "pending").slice(-900));
   return { ...target, seen: Object.fromEntries(retained) };
 }
 

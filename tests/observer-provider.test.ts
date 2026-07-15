@@ -160,7 +160,7 @@ hermes:
       const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(null, { status: 204 }));
       const runtime = createObserverRuntimeFromFiles({ configPath: join(directory, "observer.yml"), fetch, clock: () => NOW });
 
-      await expect(runtime.ingestWebhook({ headers: { "x-github-event": "workflow_run", "x-hub-signature-256": signature }, body })).resolves.toMatchObject({ accepted: true, delivered: 1 });
+      await expect(runtime.ingestWebhook({ headers: { "x-github-event": "workflow_run", "x-hub-signature-256": signature }, body })).resolves.toMatchObject({ accepted: true, delivered: 0 });
       expect(JSON.stringify(runtime)).not.toContain(webhookKey);
     } finally {
       rmSync(directory, { recursive: true, force: true });
