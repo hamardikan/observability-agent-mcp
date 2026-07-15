@@ -222,6 +222,7 @@ export function loadRuntimeConfiguration(
     baseUrl: configuration.providers.metrics.base_url,
     alertsBaseUrl: configuration.providers.alerts.base_url,
     alertsProvider: configuration.providers.alerts.type,
+    alertsToken: grafanaToken,
     fetch: options.fetch,
     queryTemplates,
     serviceHealth,
