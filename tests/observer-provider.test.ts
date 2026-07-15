@@ -173,7 +173,7 @@ hermes:
       "X-Webhook-Signature-V2",
       "X-Webhook-Timestamp",
       "X-Request-ID",
-      "X-GitHub-Event",
     ]);
+    expect(fetch.mock.calls[0]?.[1]?.headers).not.toHaveProperty("X-GitHub-Event");
   });
 });

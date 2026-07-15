@@ -7,6 +7,10 @@ export interface ObserverDeliveryResult {
 
 export type ObserverDeliveryRoute = "success" | "analysis";
 
+export interface ObserverDeliverySink {
+  deliver(body: string, eventId: string, route?: ObserverDeliveryRoute): Promise<ObserverDeliveryResult>;
+}
+
 export class ObserverDeliveryError extends Error {
   constructor(readonly code: "unavailable" | "rejected") {
     super(`observer delivery ${code}`);
@@ -14,9 +18,8 @@ export class ObserverDeliveryError extends Error {
   }
 }
 
-export class HermesDelivery {
-  readonly #url: string;
-  readonly #analysisUrl: string;
+export class HttpDeliverySink implements ObserverDeliverySink {
+  readonly #routes: Readonly<Record<ObserverDeliveryRoute, string>>;
   readonly #key: Uint8Array;
   readonly #fetch: typeof globalThis.fetch;
   readonly #clock: () => Date;
@@ -26,8 +29,7 @@ export class HermesDelivery {
   readonly #timeoutMs: number;
 
   constructor(options: {
-    url: string;
-    analysisUrl?: string;
+    routes: { success: string; analysis?: string };
     trustedInternalHosts?: readonly string[];
     key: Uint8Array;
     fetch: typeof globalThis.fetch;
@@ -37,13 +39,12 @@ export class HermesDelivery {
     backoffMs: number;
     timeoutMs: number;
   }) {
-    const url = new URL(options.url);
-    const analysisUrl = new URL(options.analysisUrl ?? options.url);
+    const successUrl = new URL(options.routes.success);
+    const analysisUrl = new URL(options.routes.analysis ?? options.routes.success);
     const trustedHosts = options.trustedInternalHosts ?? [];
-    if (!isTrustedHermesUrl(url.toString(), trustedHosts) || !isTrustedHermesUrl(analysisUrl.toString(), trustedHosts)) throw new Error("Hermes URL is not trusted");
-    if (options.key.byteLength < 32) throw new Error("Hermes HMAC key must be at least 32 bytes");
-    this.#url = url.toString();
-    this.#analysisUrl = analysisUrl.toString();
+    if (!isTrustedDeliveryUrl(successUrl.toString(), trustedHosts) || !isTrustedDeliveryUrl(analysisUrl.toString(), trustedHosts)) throw new Error("Delivery URL is not trusted");
+    if (options.key.byteLength < 32) throw new Error("Delivery HMAC key must be at least 32 bytes");
+    this.#routes = { success: successUrl.toString(), analysis: analysisUrl.toString() };
     this.#key = Buffer.from(options.key);
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
@@ -55,8 +56,8 @@ export class HermesDelivery {
 
   async deliver(body: string, eventId: string, route: ObserverDeliveryRoute = "success"): Promise<ObserverDeliveryResult> {
     const timestamp = String(Math.floor(this.#clock().getTime() / 1_000));
-    const signature = signHermesPayload(this.#key, timestamp, body);
-    const endpoint = route === "analysis" ? this.#analysisUrl : this.#url;
+    const signature = signEventPayload(this.#key, timestamp, body);
+    const endpoint = this.#routes[route];
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       let retry = false;
       try {
@@ -69,7 +70,6 @@ export class HermesDelivery {
             "X-Webhook-Signature-V2": signature,
             "X-Webhook-Timestamp": timestamp,
             "X-Request-ID": eventId,
-            "X-GitHub-Event": "ci-completion",
           },
         });
         if (response.ok) return { delivered: true, attempts: attempt };
@@ -86,11 +86,43 @@ export class HermesDelivery {
   }
 }
 
-export function signHermesPayload(key: Uint8Array, timestamp: string, body: string): string {
+// Retain the old name for callers that configure Hermes routes explicitly.
+export class HermesDelivery extends HttpDeliverySink {
+  constructor(options: {
+    url: string;
+    analysisUrl?: string;
+    trustedInternalHosts?: readonly string[];
+    key: Uint8Array;
+    fetch: typeof globalThis.fetch;
+    clock?: () => Date;
+    sleep?: (milliseconds: number) => Promise<void>;
+    maxAttempts: number;
+    backoffMs: number;
+    timeoutMs: number;
+  }) {
+    super({
+      routes: { success: options.url, ...(options.analysisUrl === undefined ? {} : { analysis: options.analysisUrl }) },
+      ...(options.trustedInternalHosts === undefined ? {} : { trustedInternalHosts: options.trustedInternalHosts }),
+      key: options.key,
+      fetch: options.fetch,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+      ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      maxAttempts: options.maxAttempts,
+      backoffMs: options.backoffMs,
+      timeoutMs: options.timeoutMs,
+    });
+  }
+}
+
+export function signEventPayload(key: Uint8Array, timestamp: string, body: string): string {
   return createHmac("sha256", key).update(`${timestamp}.${body}`, "utf8").digest("hex");
 }
 
-export function isTrustedHermesUrl(value: string, trustedInternalHosts: readonly string[] = []): boolean {
+export function signHermesPayload(key: Uint8Array, timestamp: string, body: string): string {
+  return signEventPayload(key, timestamp, body);
+}
+
+export function isTrustedDeliveryUrl(value: string, trustedInternalHosts: readonly string[] = []): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.username !== "" || url.password !== "") return false;
@@ -98,6 +130,10 @@ export function isTrustedHermesUrl(value: string, trustedInternalHosts: readonly
   if (url.protocol !== "http:") return false;
   const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
   return isTailscaleCgnatLiteral(hostname) || trustedInternalHosts.some((host) => host.toLowerCase().replace(/\.$/, "") === hostname);
+}
+
+export function isTrustedHermesUrl(value: string, trustedInternalHosts: readonly string[] = []): boolean {
+  return isTrustedDeliveryUrl(value, trustedInternalHosts);
 }
 
 function isTailscaleCgnatLiteral(hostname: string): boolean {

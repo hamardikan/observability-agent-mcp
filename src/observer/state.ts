@@ -21,6 +21,8 @@ export interface ObserverTargetState {
   readonly seen: Readonly<Record<string, ObserverSeenRecord>>;
   readonly backoffUntil?: string;
   readonly backoffMs?: number;
+  readonly deliveryBackoffUntil?: string;
+  readonly deliveryBackoffMs?: number;
 }
 
 export interface ObserverStateDocument {
@@ -130,6 +132,8 @@ function isStateDocument(value: unknown): value is ObserverStateDocument {
     if (record.cursor !== undefined && typeof record.cursor !== "string") return false;
     if (record.backoffUntil !== undefined && typeof record.backoffUntil !== "string") return false;
     if (record.backoffMs !== undefined && (typeof record.backoffMs !== "number" || !Number.isInteger(record.backoffMs) || record.backoffMs < 1 || record.backoffMs > 5 * 60_000)) return false;
+    if (record.deliveryBackoffUntil !== undefined && typeof record.deliveryBackoffUntil !== "string") return false;
+    if (record.deliveryBackoffMs !== undefined && (typeof record.deliveryBackoffMs !== "number" || !Number.isInteger(record.deliveryBackoffMs) || record.deliveryBackoffMs < 1 || record.deliveryBackoffMs > 5 * 60_000)) return false;
     if (record.seen === null || typeof record.seen !== "object" || Array.isArray(record.seen)) return false;
     for (const seen of Object.values(record.seen as Record<string, unknown>)) {
       if (seen === null || typeof seen !== "object" || Array.isArray(seen)) return false;
