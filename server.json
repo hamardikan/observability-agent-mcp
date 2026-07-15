@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.hmrdkn-labs/pak-satpam",
+  "title": "Pak Satpam",
+  "description": "Bounded observability and approval-gated CI evidence for AI agents.",
+  "repository": {
+    "url": "https://github.com/hmrdkn-labs/pak-satpam",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@hmrdkn-labs/pak-satpam",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

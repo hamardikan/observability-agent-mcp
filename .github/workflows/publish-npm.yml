@@ -1,0 +1,40 @@
+name: publish-npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.22.3
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Pin npm trusted publishing CLI
+        run: npm install --global npm@11.5.1
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - run: |
+          npm run release:validate -- --require-built --tag "$GITHUB_REF_NAME"
+      - run: npm pack --dry-run
+      - run: npm publish --access public

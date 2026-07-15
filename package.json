@@ -1,14 +1,15 @@
 {
-  "name": "@hamardikan/observability-agent-mcp",
+  "name": "@hmrdkn-labs/pak-satpam",
   "version": "0.2.0",
   "description": "Pak Satpam: bounded observability and approval-gated CI evidence for AI agents",
+  "mcpName": "io.github.hmrdkn-labs/pak-satpam",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hamardikan/pak-satpam.git"
+    "url": "git+https://github.com/hmrdkn-labs/pak-satpam.git"
   },
-  "homepage": "https://github.com/hamardikan/pak-satpam#readme",
+  "homepage": "https://github.com/hmrdkn-labs/pak-satpam#readme",
   "bugs": {
-    "url": "https://github.com/hamardikan/pak-satpam/issues"
+    "url": "https://github.com/hmrdkn-labs/pak-satpam/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -38,7 +39,9 @@
     "observability-agent-mcp": "dist/cli.js",
     "observability-agent-mcp-observer": "dist/observer/cli.js",
     "observability-agent-mcp-approval": "dist/approval-cli.js",
-    "observability-agent-mcp-approve": "dist/approval-cli.js"
+    "observability-agent-mcp-approve": "dist/approval-cli.js",
+    "pak-satpam": "dist/cli.js",
+    "pak-satpam-http": "dist/http-cli.js"
   },
   "files": [
     "dist",
@@ -47,6 +50,10 @@
   ],
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -59,6 +66,7 @@
     "audit": "npm audit --audit-level=high",
     "package:dry": "npm pack --dry-run",
     "package:smoke": "node scripts/package-smoke.mjs",
+    "release:validate": "node scripts/validate-package-metadata.mjs",
     "approval": "node dist/approval-cli.js",
     "validate": "npm run typecheck && npm test && npm run build && npm run test:stdio && npm run inspector:list && npm run package:smoke && npm run audit && ./ci/validate-foundation.sh",
     "start": "node dist/cli.js",
