@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadRuntimeConfiguration } from "../src/runtime/load-runtime-configuration.js";
+import { diagnoseRuntimeConfiguration } from "../src/diagnostics/config-diagnostics.js";
 
 const FIXED_NOW = new Date("2026-07-10T00:00:00.000Z");
 
@@ -41,8 +42,8 @@ describe("private runtime configuration", () => {
       clock: () => FIXED_NOW,
     });
 
-    await runtime.provider.queryMetrics({ queryTemplate: "homelab-node-up" });
-    const capabilities = await runtime.provider.capabilities({});
+    await runtime.provider!.queryMetrics({ queryTemplate: "homelab-node-up" });
+    const capabilities = await runtime.provider!.capabilities({});
 
     expect(runtime.bearerToken).toBe("mcp-test-token-123456789");
     expect(runtime.visualAllowlist).toEqual({
@@ -62,6 +63,58 @@ describe("private runtime configuration", () => {
       ]),
     );
     expect(JSON.stringify(runtime)).not.toContain("grafana-test-token-123456");
+  });
+
+  it("loads a CI-only profile without Grafana or metrics configuration", () => {
+    const approvalKeyPath = join(directory, "approval-key");
+    writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
+    writeFileSync(configPath, `${CI_ONLY_CONFIG.replace("APPROVAL_KEY_FILE", approvalKeyPath)}\n`, { mode: 0o600 });
+    rmSync(grafanaTokenPath);
+
+    const runtime = loadRuntimeConfiguration({ configPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
+
+    expect(runtime.profile).toBe("ci-only");
+    expect(runtime.provider).toBeUndefined();
+    expect(runtime.visualProvider).toBeUndefined();
+    expect(runtime.visualAllowlist).toBeUndefined();
+    expect(runtime.ci).toBeDefined();
+  });
+
+  it("rejects a profile that omits its required module configuration", () => {
+    writeFileSync(configPath, "version: 1\nprofile: ci-only\n", { mode: 0o600 });
+    expect(() => loadRuntimeConfiguration({ configPath, mcpTokenPath, fetch })).toThrow("Invalid runtime configuration");
+  });
+
+  it("diagnoses configuration with stable metadata-only codes", () => {
+    const diagnostic = diagnoseRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath });
+    expect(diagnostic).toMatchObject({
+      ok: true,
+      profile: "observability-only",
+      diagnostics: [{ code: "RUNTIME_CONFIG_OK", severity: "info" }],
+    });
+    const output = JSON.stringify(diagnostic);
+    expect(output).not.toContain("grafana-test-token-123456");
+    expect(output).not.toContain(directory);
+  });
+
+  it("diagnoses CI-only readiness without requiring a Grafana token path", () => {
+    const approvalKeyPath = join(directory, "approval-key");
+    writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
+    writeFileSync(configPath, `${CI_ONLY_CONFIG.replace("APPROVAL_KEY_FILE", approvalKeyPath)}\n`, { mode: 0o600 });
+    rmSync(grafanaTokenPath);
+
+    const diagnostic = diagnoseRuntimeConfiguration({ configPath, mcpTokenPath });
+    expect(diagnostic).toMatchObject({ ok: true, profile: "ci-only" });
+    expect(diagnostic.diagnostics).toEqual([{ code: "RUNTIME_CONFIG_OK", severity: "info" }]);
+    expect(JSON.stringify(diagnostic)).not.toContain(approvalKeyPath);
+  });
+
+  it("reports missing required secret metadata without exposing its path", () => {
+    rmSync(grafanaTokenPath);
+    const diagnostic = diagnoseRuntimeConfiguration({ configPath, mcpTokenPath });
+    expect(diagnostic.ok).toBe(false);
+    expect(diagnostic.diagnostics).toContainEqual({ code: "RUNTIME_GRAFANA_TOKEN_MISSING", severity: "error" });
+    expect(JSON.stringify(diagnostic)).not.toContain(directory);
   });
 
   it("rejects unknown configuration and insecure secret file permissions", () => {
@@ -97,7 +150,7 @@ describe("private runtime configuration", () => {
     writeFileSync(installationIdPath, "456\n", { mode: 0o600 });
     writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs1", format: "pem" }), { mode: 0o600 });
     writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
-    writeFileSync(configPath, `${VALID_CONFIG}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [goal14-controlled-fixture.yml]\n  github:\n    api_base_url: https://api.github.com\n    app:\n      app_id_file: ${appIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n  max_freshness_seconds: 300\n`);
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [goal14-controlled-fixture.yml]\n  github:\n    api_base_url: https://api.github.com\n    app:\n      app_id_file: ${appIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n  max_freshness_seconds: 300\n`);
 
     const runtime = loadRuntimeConfiguration({
       configPath,
@@ -112,7 +165,7 @@ describe("private runtime configuration", () => {
   it("loads the read-only Jenkins provider and Grafana Alertmanager option", async () => {
     const approvalKeyPath = join(directory, "approval-key");
     writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
-    writeFileSync(configPath, `${VALID_CONFIG.replace("type: vmalert", "type: grafana-alertmanager").replace("base_url: http://vmalert:8880", "base_url: https://grafana:3000")}
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined").replace("type: vmalert", "type: grafana-alertmanager").replace("base_url: http://vmalert:8880", "base_url: https://grafana:3000")}
 ci:
   enabled: true
   provider: jenkins
@@ -130,7 +183,7 @@ ci:
       .mockResolvedValueOnce(new Response(JSON.stringify([{ labels: { alertname: "Test", service: "infra", severity: "info" }, annotations: {}, startsAt: "2026-07-10T00:00:00Z", status: { state: "active" } }])))
       .mockResolvedValueOnce(new Response(JSON.stringify({ number: 1, result: "SUCCESS", building: false, timestamp: FIXED_NOW.getTime() })));
     const runtime = loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch, clock: () => FIXED_NOW });
-    await runtime.provider.activeAlerts({});
+    await runtime.provider!.activeAlerts({});
     expect(String(fetch.mock.calls[0]?.[0])).toBe("https://grafana:3000/api/alertmanager/grafana/api/v2/alerts");
     expect(runtime.ci?.provider.constructor.name).toBe("JenkinsProvider");
   });
@@ -145,7 +198,7 @@ ci:
     writeFileSync(installationIdPath, "456\n", { mode: 0o600 });
     writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs1", format: "pem" }), { mode: 0o600 });
     writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
-    writeFileSync(configPath, `${VALID_CONFIG}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [ci.yml]\n  github:\n    api_base_url: https://api.github.com\n    app:\n      app_id_file: ${appIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n`);
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [ci.yml]\n  github:\n    api_base_url: https://api.github.com\n    app:\n      app_id_file: ${appIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n`);
     const ciFetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ token: "read-token-123456789", expires_at: "2026-07-10T01:00:00Z" })))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 101, status: "completed", conclusion: "failure", run_attempt: 1, event: "workflow_dispatch", head_branch: "main", head_sha: "a".repeat(40), created_at: "2026-07-10T00:00:00Z", updated_at: "2026-07-10T00:00:00Z" })))
@@ -170,7 +223,7 @@ ci:
     writeFileSync(installationIdPath, "456\n", { mode: 0o600 });
     writeFileSync(privateKeyPath, privateKey.export({ type: "pkcs1", format: "pem" }), { mode: 0o600 });
     writeFileSync(approvalKeyPath, "a".repeat(32), { mode: 0o600 });
-    writeFileSync(configPath, `${VALID_CONFIG}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [ci.yml]\n  github:\n    app:\n      app_id_file: ${appIdPath}\n      installation_id_file: ${installationIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n`);
+    writeFileSync(configPath, `${VALID_CONFIG.replace("profile: observability-only", "profile: combined")}\nci:\n  enabled: true\n  allowlist:\n    - repo: owner/repo\n      workflows: [ci.yml]\n  github:\n    app:\n      app_id_file: ${appIdPath}\n      installation_id_file: ${installationIdPath}\n      pem_key_file: ${privateKeyPath}\n      installations:\n        - owner: owner\n          installation_id_file: ${installationIdPath}\n  approval:\n    key_file: ${approvalKeyPath}\n    replay_file: ${join(directory, "replay.jsonl")}\n    audit_file: ${join(directory, "audit.jsonl")}\n`);
 
     expect(() => loadRuntimeConfiguration({ configPath, grafanaTokenPath, mcpTokenPath, fetch })).toThrow("Invalid runtime configuration");
   });
@@ -180,6 +233,7 @@ const fetch = vi.fn<typeof globalThis.fetch>();
 
 const VALID_CONFIG = `
 version: 1
+profile: observability-only
 providers:
   metrics:
     type: prometheus-compatible
@@ -211,4 +265,21 @@ policy:
       panels:
         scrape-health: { id: 1 }
         host-memory: { id: 2 }
+`;
+
+const CI_ONLY_CONFIG = `
+version: 1
+profile: ci-only
+ci:
+  enabled: true
+  provider: jenkins
+  allowlist:
+    - repo: owner/repo
+      workflows: [ci.yml]
+  jenkins:
+    base_url: https://jenkins.example
+  approval:
+    key_file: APPROVAL_KEY_FILE
+    replay_file: /tmp/pak-satpam-replay.jsonl
+    audit_file: /tmp/pak-satpam-audit.jsonl
 `;

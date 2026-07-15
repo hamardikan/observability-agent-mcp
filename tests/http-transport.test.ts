@@ -93,6 +93,39 @@ describe("private Streamable HTTP transport", () => {
     await new Promise<void>((resolve, reject) => ciServer.close((error) => (error ? reject(error) : resolve())));
   });
 
+  it("serves only the CI endpoint when observability is not configured", async () => {
+    const app = createObservabilityHttpApp({
+      ci: {
+        provider: new GitHubActionsProvider({ token: "github-token-for-http-test", fetch: globalThis.fetch, clock: () => FIXED_NOW }),
+        policy: createCIAllowlist({ "owner/repo": ["ci.yml"] }),
+        approval: new ApprovalTokenService({ key: Buffer.from("c".repeat(32)), clock: () => FIXED_NOW, audit: new InMemoryApprovalAuditStore() }),
+      },
+      bearerToken: TEST_CREDENTIAL,
+      host: "127.0.0.1",
+      allowedHosts: ["127.0.0.1"],
+      clock: () => FIXED_NOW,
+    });
+    const ciOnlyServer = createServer(app);
+    await new Promise<void>((resolve) => ciOnlyServer.listen(0, "127.0.0.1", resolve));
+    const address = ciOnlyServer.address() as AddressInfo;
+    const ciOnlyBaseUrl = new URL(`http://127.0.0.1:${address.port}`);
+
+    const ciResponse = await fetch(new URL("/mcp/ci", ciOnlyBaseUrl), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_CREDENTIAL}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream", Host: "127.0.0.1" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    const observabilityResponse = await fetch(new URL("/mcp", ciOnlyBaseUrl), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_CREDENTIAL}`, "Content-Type": "application/json", Host: "127.0.0.1" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+
+    expect(ciResponse.status).toBe(200);
+    expect(observabilityResponse.status).toBe(404);
+    await new Promise<void>((resolve, reject) => ciOnlyServer.close((error) => (error ? reject(error) : resolve())));
+  });
+
   it("keeps health metadata public to the private network but protects MCP", async () => {
     const health = await fetch(new URL("/healthz", baseUrl));
     const unauthorized = await fetch(new URL("/mcp", baseUrl), {

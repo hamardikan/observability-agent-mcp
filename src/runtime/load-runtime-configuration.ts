@@ -23,6 +23,9 @@ import { MappedGitHubAppTokenProvider } from "../providers/mapped-github-app-tok
 
 const MAX_CONFIG_BYTES = 256 * 1_024;
 
+export const RUNTIME_PROFILES = ["observability-only", "ci-only", "combined"] as const;
+export type RuntimeProfile = (typeof RUNTIME_PROFILES)[number];
+
 const HttpProviderSchema = z
   .object({
     type: z.string().min(1).max(64),
@@ -119,41 +122,74 @@ const CIConfigSchema = z
   })
   .strict();
 
-const RuntimeConfigSchema = z
+const ObservabilityProvidersSchema = z
+  .object({
+    metrics: HttpProviderSchema.extend({ type: z.literal("prometheus-compatible") }).strict(),
+    alerts: HttpProviderSchema.extend({ type: z.enum(["vmalert", "grafana-alertmanager"]) }).strict(),
+    grafana: HttpProviderSchema.extend({ type: z.literal("grafana") }).strict(),
+  })
+  .strict();
+
+const ObservabilityPolicySchema = z
+  .object({
+    named_queries: z.record(LogicalIdSchema, QuerySchema),
+    service_health: z.record(LogicalIdSchema, ServiceHealthSchema),
+    dashboards: z.record(LogicalIdSchema, DashboardSchema),
+  })
+  .strict();
+
+export const RuntimeConfigSchema = z
   .object({
     version: z.literal(1),
-    providers: z
-      .object({
-        metrics: HttpProviderSchema.extend({ type: z.literal("prometheus-compatible") }).strict(),
-        alerts: HttpProviderSchema.extend({ type: z.enum(["vmalert", "grafana-alertmanager"]) }).strict(),
-        grafana: HttpProviderSchema.extend({ type: z.literal("grafana") }).strict(),
-      })
-      .strict(),
-    policy: z
-      .object({
-        named_queries: z.record(LogicalIdSchema, QuerySchema),
-        service_health: z.record(LogicalIdSchema, ServiceHealthSchema),
-        dashboards: z.record(LogicalIdSchema, DashboardSchema),
-      })
-      .strict(),
+    profile: z.enum(RUNTIME_PROFILES),
+    providers: ObservabilityProvidersSchema.optional(),
+    policy: ObservabilityPolicySchema.optional(),
     ci: CIConfigSchema.optional(),
   })
   .strict()
   .superRefine((configuration, context) => {
-    for (const [serviceId, health] of Object.entries(configuration.policy.service_health)) {
-      if (configuration.policy.named_queries[health.query_template] === undefined) {
-        context.addIssue({
-          code: "custom",
-          path: ["policy", "service_health", serviceId, "query_template"],
-          message: "must reference a named query",
-        });
+    const needsObservability = configuration.profile !== "ci-only";
+    if (needsObservability && (configuration.providers === undefined || configuration.policy === undefined)) {
+      context.addIssue({ code: "custom", path: ["providers"], message: "observability configuration is required for this profile" });
+    }
+    if (configuration.profile === "observability-only" && configuration.ci?.enabled === true) {
+      context.addIssue({ code: "custom", path: ["ci"], message: "CI requires the combined profile" });
+    }
+    if ((configuration.profile === "ci-only" || configuration.profile === "combined") && configuration.ci?.enabled !== true) {
+      context.addIssue({ code: "custom", path: ["ci"], message: "enabled CI configuration is required for this profile" });
+    }
+    if (configuration.policy !== undefined) {
+      for (const [serviceId, health] of Object.entries(configuration.policy.service_health)) {
+        if (configuration.policy.named_queries[health.query_template] === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["policy", "service_health", serviceId, "query_template"],
+            message: "must reference a named query",
+          });
+        }
       }
     }
   });
 
+export type RuntimeConfiguration = z.infer<typeof RuntimeConfigSchema>;
+
+export function parseRuntimeConfiguration(document: string): RuntimeConfiguration {
+  let raw: unknown;
+  try {
+    raw = parseYaml(document);
+  } catch {
+    throw new Error("Invalid runtime configuration");
+  }
+  const parsed = RuntimeConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error("Invalid runtime configuration");
+  }
+  return parsed.data;
+}
+
 export interface LoadRuntimeConfigurationOptions {
   readonly configPath: string;
-  readonly grafanaTokenPath: string;
+  readonly grafanaTokenPath?: string;
   readonly mcpTokenPath: string;
   readonly fetch: typeof globalThis.fetch;
   readonly clock?: Clock;
@@ -163,9 +199,10 @@ export class LoadedRuntimeConfiguration {
   readonly #bearerToken: string;
 
   constructor(
-    public readonly provider: ObservabilityProvider,
-    public readonly visualProvider: ObservabilityVisualProvider,
-    public readonly visualAllowlist: VisualAllowlist,
+    public readonly profile: RuntimeProfile,
+    public readonly provider: ObservabilityProvider | undefined,
+    public readonly visualProvider: ObservabilityVisualProvider | undefined,
+    public readonly visualAllowlist: VisualAllowlist | undefined,
     bearerToken: string,
     public readonly ci: CIService | undefined = undefined,
   ) {
@@ -181,82 +218,83 @@ export function loadRuntimeConfiguration(
   options: LoadRuntimeConfigurationOptions,
 ): LoadedRuntimeConfiguration {
   const document = readBoundedFile(options.configPath, false);
-  let raw: unknown;
-  try {
-    raw = parseYaml(document);
-  } catch {
-    throw new Error("Invalid runtime configuration");
-  }
-  const parsed = RuntimeConfigSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new Error("Invalid runtime configuration");
-  }
-
-  const grafanaToken = readBoundedFile(options.grafanaTokenPath, true).trim();
   const bearerToken = readBoundedFile(options.mcpTokenPath, true).trim();
-  if (grafanaToken.length < 16 || bearerToken.length < 16) {
+  if (bearerToken.length < 16) {
     throw new Error("Runtime secret is missing or too short");
   }
 
-  const configuration = parsed.data;
-  const queryTemplates = Object.fromEntries(
-    Object.entries(configuration.policy.named_queries).map(([name, query]) => [
-      name,
-      { expression: query.expression, labelKeys: query.label_keys },
-    ]),
-  );
-  const serviceHealth = Object.fromEntries(
-    Object.entries(configuration.policy.service_health).map(([name, health]) => [
-      name,
-      {
-        queryTemplate: health.query_template,
-        healthyWhen: health.healthy_when,
-        ...(health.degraded_when === undefined
-          ? {}
-          : { degradedWhen: health.degraded_when }),
-        summary: health.summary,
-      },
-    ]),
-  );
-  const provider = new VictoriaMetricsProvider({
-    baseUrl: configuration.providers.metrics.base_url,
-    alertsBaseUrl: configuration.providers.alerts.base_url,
-    alertsProvider: configuration.providers.alerts.type,
-    fetch: options.fetch,
-    queryTemplates,
-    serviceHealth,
-    visualsEnabled: true,
-    dashboardRefs: Object.entries(configuration.policy.dashboards).map(
-      ([dashboardId, dashboard]) => ({ dashboardId, title: dashboard.title }),
-    ),
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-  });
+  const configuration = parseRuntimeConfiguration(document);
 
-  const panels: Record<string, string> = {};
-  const dashboards: Record<string, string> = {};
-  const allowlistDashboards: Record<string, { panels: string[] }> = {};
-  for (const [dashboardId, dashboard] of Object.entries(configuration.policy.dashboards)) {
-    const basePath = `${encodeURIComponent(dashboard.uid)}/${encodeURIComponent(dashboard.slug)}`;
-    dashboards[dashboardId] = `/render/d/${basePath}`;
-    allowlistDashboards[dashboardId] = { panels: Object.keys(dashboard.panels) };
-    for (const [panelId, panel] of Object.entries(dashboard.panels)) {
-      panels[`${dashboardId}:${panelId}`] = `/render/d-solo/${basePath}?panelId=${String(panel.id)}`;
+  let provider: ObservabilityProvider | undefined;
+  let visualProvider: ObservabilityVisualProvider | undefined;
+  let visualAllowlist: VisualAllowlist | undefined;
+  if (configuration.profile !== "ci-only") {
+    const providers = configuration.providers;
+    const policy = configuration.policy;
+    if (providers === undefined || policy === undefined) throw new Error("Invalid runtime configuration");
+    const grafanaToken = options.grafanaTokenPath === undefined
+      ? ""
+      : readBoundedFile(options.grafanaTokenPath, true).trim();
+    if (grafanaToken.length < 16) throw new Error("Runtime secret is missing or too short");
+    const queryTemplates = Object.fromEntries(
+      Object.entries(policy.named_queries).map(([name, query]) => [
+        name,
+        { expression: query.expression, labelKeys: query.label_keys },
+      ]),
+    );
+    const serviceHealth = Object.fromEntries(
+      Object.entries(policy.service_health).map(([name, health]) => [
+        name,
+        {
+          queryTemplate: health.query_template,
+          healthyWhen: health.healthy_when,
+          ...(health.degraded_when === undefined ? {} : { degradedWhen: health.degraded_when }),
+          summary: health.summary,
+        },
+      ]),
+    );
+    provider = new VictoriaMetricsProvider({
+      baseUrl: providers.metrics.base_url,
+      alertsBaseUrl: providers.alerts.base_url,
+      alertsProvider: providers.alerts.type,
+      fetch: options.fetch,
+      queryTemplates,
+      serviceHealth,
+      visualsEnabled: true,
+      dashboardRefs: Object.entries(policy.dashboards).map(
+        ([dashboardId, dashboard]) => ({ dashboardId, title: dashboard.title }),
+      ),
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+    });
+
+    const panels: Record<string, string> = {};
+    const dashboards: Record<string, string> = {};
+    const allowlistDashboards: Record<string, { panels: string[] }> = {};
+    for (const [dashboardId, dashboard] of Object.entries(policy.dashboards)) {
+      const basePath = `${encodeURIComponent(dashboard.uid)}/${encodeURIComponent(dashboard.slug)}`;
+      dashboards[dashboardId] = `/render/d/${basePath}`;
+      allowlistDashboards[dashboardId] = { panels: Object.keys(dashboard.panels) };
+      for (const [panelId, panel] of Object.entries(dashboard.panels)) {
+        panels[`${dashboardId}:${panelId}`] = `/render/d-solo/${basePath}?panelId=${String(panel.id)}`;
+      }
     }
+    visualAllowlist = { dashboards: allowlistDashboards };
+    visualProvider = new GrafanaVisualProvider({
+      baseUrl: providers.grafana.base_url,
+      token: grafanaToken,
+      fetch: options.fetch,
+      panels,
+      dashboards,
+    });
   }
-  const visualProvider = new GrafanaVisualProvider({
-    baseUrl: configuration.providers.grafana.base_url,
-    token: grafanaToken,
-    fetch: options.fetch,
-    panels,
-    dashboards,
-  });
 
   const ci = buildCIConfiguration(configuration.ci, options);
 
   return new LoadedRuntimeConfiguration(
+    configuration.profile,
     provider,
     visualProvider,
-    { dashboards: allowlistDashboards },
+    visualAllowlist,
     bearerToken,
     ci,
   );

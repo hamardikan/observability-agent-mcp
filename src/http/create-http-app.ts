@@ -14,7 +14,7 @@ import { createCIServer, createObservabilityServer } from "../server/create-serv
 import type { CIService } from "../ci/service.js";
 
 export interface CreateObservabilityHttpAppOptions {
-  readonly provider: ObservabilityProvider;
+  readonly provider?: ObservabilityProvider;
   readonly bearerToken: string;
   readonly host: string;
   readonly allowedHosts: readonly string[];
@@ -30,6 +30,9 @@ export function createObservabilityHttpApp(options: CreateObservabilityHttpAppOp
   }
   if (options.allowedHosts.length === 0) {
     throw new Error("MCP HTTP allowed hosts must not be empty");
+  }
+  if (options.provider === undefined && options.ci === undefined) {
+    throw new Error("MCP HTTP app requires an enabled runtime module");
   }
 
   const app = createMcpExpressApp({
@@ -48,15 +51,18 @@ export function createObservabilityHttpApp(options: CreateObservabilityHttpAppOp
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     }));
   }
-  registerMcpEndpoint("/mcp", () => createObservabilityServer({
-    provider: options.provider,
-    ...(options.clock === undefined ? {} : { clock: options.clock }),
-    ...(options.visualAllowlist === undefined
-      ? {}
-      : { visualAllowlist: options.visualAllowlist }),
-    ...(options.visualProvider === undefined ? {} : { visualProvider: options.visualProvider }),
-    ...(ci === undefined ? {} : { ci }),
-  }));
+  const provider = options.provider;
+  if (provider !== undefined) {
+    registerMcpEndpoint("/mcp", () => createObservabilityServer({
+      provider,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+      ...(options.visualAllowlist === undefined
+        ? {}
+        : { visualAllowlist: options.visualAllowlist }),
+      ...(options.visualProvider === undefined ? {} : { visualProvider: options.visualProvider }),
+      ...(ci === undefined ? {} : { ci }),
+    }));
+  }
 
   return app;
 

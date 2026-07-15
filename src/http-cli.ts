@@ -10,16 +10,17 @@ const allowedHosts = requiredEnvironment("MCP_HTTP_ALLOWED_HOSTS")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
+const grafanaTokenPath = optionalEnvironment("GRAFANA_TOKEN_FILE");
 const runtime = loadRuntimeConfiguration({
   configPath: requiredEnvironment("OBSERVABILITY_PROVIDER_CONFIG"),
-  grafanaTokenPath: requiredEnvironment("GRAFANA_TOKEN_FILE"),
+  ...(grafanaTokenPath === undefined ? {} : { grafanaTokenPath }),
   mcpTokenPath: requiredEnvironment("MCP_TOKEN_FILE"),
   fetch: globalThis.fetch.bind(globalThis),
 });
 const app = createObservabilityHttpApp({
-  provider: runtime.provider,
-  visualProvider: runtime.visualProvider,
-  visualAllowlist: runtime.visualAllowlist,
+  ...(runtime.provider === undefined ? {} : { provider: runtime.provider }),
+  ...(runtime.visualProvider === undefined ? {} : { visualProvider: runtime.visualProvider }),
+  ...(runtime.visualAllowlist === undefined ? {} : { visualAllowlist: runtime.visualAllowlist }),
   ...(runtime.ci === undefined ? {} : { ci: runtime.ci }),
   bearerToken: runtime.bearerToken,
   host,
@@ -47,6 +48,11 @@ function requiredEnvironment(name: string): string {
     throw new Error(`${name} is required`);
   }
   return value;
+}
+
+function optionalEnvironment(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 function parsePort(value: string): number {
