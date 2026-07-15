@@ -18,7 +18,7 @@ for (const reference of [immutableReference, ...tagReferences]) {
 const manifest = inspectRaw(immutableReference);
 assert(manifest.mediaType === "application/vnd.oci.image.index.v1+json", "published image must be an OCI index");
 const platforms = manifest.manifests
-  .filter((entry) => entry.platform?.os && entry.platform.architecture)
+  .filter((entry) => isRuntimePlatform(entry.platform))
   .map((entry) => `${entry.platform.os}/${entry.platform.architecture}`)
   .sort();
 assert(JSON.stringify(platforms) === JSON.stringify(["linux/amd64", "linux/arm64"]), `unexpected platforms: ${platforms.join(",")}`);
@@ -42,6 +42,10 @@ function inspectRaw(reference) {
 
 function inspectFormat(reference, format) {
   return JSON.parse(execFileSync("docker", ["buildx", "imagetools", "inspect", "--format", format, reference], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }));
+}
+
+function isRuntimePlatform(platform) {
+  return platform?.os && platform.architecture && platform.os !== "unknown" && platform.architecture !== "unknown";
 }
 
 function isVersion(value) {

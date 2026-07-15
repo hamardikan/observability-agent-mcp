@@ -3,6 +3,15 @@
 All notable changes to Pak Satpam are documented here. A changelog entry is not
 a publication receipt.
 
+## [0.2.1] - 2026-07-15
+
+- Exclude BuildKit provenance and SPDX SBOM `unknown/unknown` attestation
+  manifests from runtime platform comparison while continuing to require both
+  attestation formats for every published runtime platform.
+- Record that v0.2.0 was published but its post-publish image verification
+  failed because the verifier counted attestation manifests as runtime
+  platforms; v0.2.1 contains the verifier correction.
+
 ## [0.2.0] - 2026-07-15
 
 ### Goal 19 CP3 Documentation And Contract

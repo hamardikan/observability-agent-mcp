@@ -1,0 +1,76 @@
+{
+  "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "raw": {
+    "mediaType": "application/vnd.oci.image.index.v1+json",
+    "manifests": [
+      {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 1234,
+        "platform": {
+          "os": "linux",
+          "architecture": "amd64"
+        }
+      },
+      {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 1234,
+        "platform": {
+          "os": "linux",
+          "architecture": "arm64"
+        }
+      },
+      {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "size": 567,
+        "platform": {
+          "os": "unknown",
+          "architecture": "unknown"
+        },
+        "annotations": {
+          "vnd.docker.reference.type": "attestation-manifest",
+          "vnd.docker.reference.digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size": 567,
+        "platform": {
+          "os": "unknown",
+          "architecture": "unknown"
+        },
+        "annotations": {
+          "vnd.docker.reference.type": "attestation-manifest",
+          "vnd.docker.reference.digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "linux/amd64": {
+      "SLSA": {
+        "predicateType": "https://slsa.dev/provenance/v1"
+      }
+    },
+    "linux/arm64": {
+      "SLSA": {
+        "predicateType": "https://slsa.dev/provenance/v1"
+      }
+    }
+  },
+  "sbom": {
+    "linux/amd64": {
+      "SPDX": {
+        "spdxVersion": "SPDX-2.3"
+      }
+    },
+    "linux/arm64": {
+      "SPDX": {
+        "spdxVersion": "SPDX-2.3"
+      }
+    }
+  }
+}
