@@ -41,7 +41,7 @@ export interface JenkinsProviderOptions {
   readonly baseUrl?: string;
   /** Origin plus base path, kept separate to prevent complete URL/path ambiguity. */
   readonly endpoint?: CIProviderEndpoint;
-  /** Branch in a multibranch job; challenge deployments use main. */
+  /** Optional extra job segment appended only when set; workflow is the full multibranch job path (folder[/branch]). */
   readonly branch?: string;
   /** Jenkins API token authentication; anonymous read access remains supported. */
   readonly username?: string;
@@ -77,7 +77,7 @@ export class JenkinsProvider implements CIProvider {
     this.#fetch = options.fetch;
     this.#clock = options.clock ?? (() => new Date());
     this.#maxFreshnessMs = options.maxFreshnessMs ?? 5 * 60_000;
-    this.#branch = options.branch === undefined ? "main" : options.branch;
+    this.#branch = options.branch;
     this.#authorization = basicAuthorization(options);
     this.#providerName = CIProviderNameSchema.parse(options.providerName ?? JENKINS_PROVIDER_NAME);
   }

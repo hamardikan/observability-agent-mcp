@@ -17,7 +17,7 @@ describe("Jenkins read-only CI adapter", () => {
         actions: [{ lastBuiltRevision: { SHA1: "a".repeat(40) } }],
       })))
       .mockResolvedValueOnce(new Response("Authorization: Bearer jenkins-secret\ncompile failed\nthird line\n"));
-    const adapter = new JenkinsProvider({ baseUrl: "https://jenkins.local/jenkins/", fetch, clock: () => NOW });
+    const adapter = new JenkinsProvider({ baseUrl: "https://jenkins.local/jenkins/", branch: "main", fetch, clock: () => NOW });
 
     const status = await adapter.getWorkflowStatus({ repo: "academytools/planpal-backend-learner-6", workflow: "planpal-backend", runId: "42" });
     const logs = await adapter.getLogEvidence({ repo: "academytools/planpal-backend-learner-6", workflow: "planpal-backend", runId: "42", jobId: "42", maxLines: 2 });
@@ -44,6 +44,7 @@ describe("Jenkins read-only CI adapter", () => {
     })));
     const adapter = new JenkinsProvider({
       baseUrl: "https://jenkins.local/reverse-proxy/",
+      branch: "main",
       username: "ci-reader",
       token: "jenkins-api-token-only-in-header",
       fetch,
@@ -74,6 +75,7 @@ describe("Jenkins read-only CI adapter", () => {
     })));
     const adapter = new JenkinsProvider({
       endpoint: { origin: "https://jenkins.local", path: "/reverse-proxy" },
+      branch: "main",
       fetch,
       clock: () => NOW,
     });
@@ -82,6 +84,21 @@ describe("Jenkins read-only CI adapter", () => {
 
     expect(String(fetch.mock.calls[0]?.[0])).toBe("https://jenkins.local/reverse-proxy/job/folder/job/backend/job/main/7/api/json");
     expect(String(fetch.mock.calls[0]?.[0])).not.toContain("reverse-proxy/reverse-proxy");
+  });
+
+  it("uses the full multibranch workflow path without appending a default branch", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({
+      number: 1,
+      result: "SUCCESS",
+      building: false,
+      timestamp: NOW.getTime(),
+      duration: 0,
+    })));
+    const adapter = new JenkinsProvider({ baseUrl: "https://jenkins.local/", fetch, clock: () => NOW });
+
+    await adapter.getWorkflowStatus({ repo: "academytools/planpal-config-6", workflow: "planpalasix-config/PR-240", runId: "1" });
+
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://jenkins.local/job/planpalasix-config/job/PR-240/1/api/json");
   });
 
   it("accepts a provider-native string build identifier", async () => {
